@@ -18,6 +18,9 @@ dependencies = [
     "pyyaml",
 ]
 
+[project.scripts]
+hsi-vm = "hsi_compression.vm_cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

@@ -5,17 +5,16 @@ import json
 import argparse
 
 import torch
-import wandb
 from torch.utils.data import Subset
 
 from hsi_compression.data import build_dataset, build_dataloader
 from hsi_compression.engine.checkpointing import load_checkpoint
-from hsi_compression.losses import build_loss
 from hsi_compression.metrics import masked_mse, masked_rmse, masked_psnr, masked_sam_deg
 from hsi_compression.models.registry import build_model
 from hsi_compression.paths import ensure_artifact_dirs, logs_dir
 from hsi_compression.utils import load_project_env
 from hsi_compression.utils.wandb_utils import init_wandb
+from tqdm.auto import tqdm
 
 
 def parse_args():
@@ -57,6 +56,7 @@ def parse_args():
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--disable-wandb", action="store_true")
     parser.add_argument("--save-json", action="store_true")
+    parser.add_argument("--no-progress", action="store_true")
 
     return parser.parse_args()
 
@@ -66,6 +66,8 @@ def evaluate_model(
     model,
     loader,
     device: torch.device,
+    show_progress: bool = True,
+    split_name: str = "eval",
 ):
     model.eval()
 
@@ -76,7 +78,11 @@ def evaluate_model(
     num_batches = 0
     latent_shape = None
 
-    for batch in loader:
+    progress = loader
+    if show_progress:
+        progress = tqdm(loader, desc=f"Evaluate [{split_name}]", leave=False)
+
+    for batch in progress:
         x = batch["x"].to(device)
         mask = batch["valid_mask"].to(device)
 
@@ -97,6 +103,14 @@ def evaluate_model(
 
         if latent_shape is None and z is not None:
             latent_shape = tuple(z.shape[1:])
+
+        if show_progress:
+            progress.set_postfix({
+                "loss": f"{loss.item():.4f}",
+                "rmse": f"{rmse.item():.4f}",
+                "psnr": f"{psnr.item():.2f}",
+                "sam": f"{sam_deg.item():.2f}",
+            })
 
     return {
         "loss": total_loss / max(num_batches, 1),
@@ -198,6 +212,8 @@ def main():
         model=model,
         loader=loader,
         device=device,
+        show_progress=True,
+        split_name=args.split,
     )
 
     # 5. Compression ratio proxy
