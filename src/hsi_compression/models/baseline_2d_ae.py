@@ -18,12 +18,12 @@ class ConvBlock(nn.Module):
 
 class Baseline2DAutoencoder(nn.Module):
     """
-    A simple 2D convolutional autoencoder for HSI patches.
+    Simple 2D convolutional autoencoder for HSI patches.
 
-    Input shape:
-      (N, bands, 128, 128)
+    Input:
+      (N, C, 128, 128)
 
-    Latent shape after two downsamples:
+    Latent after two downsamples:
       (N, latent_channels, 32, 32)
     """
     def __init__(
@@ -68,20 +68,19 @@ class Baseline2DAutoencoder(nn.Module):
         x_hat = self.out_conv(x)
         return x_hat
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
         x_hat = self.decode(z)
-        return x_hat, z
+        return {
+            "x_hat": x_hat,
+            "z": z,
+        }
 
     @staticmethod
     def compression_ratio_proxy(
         input_shape: tuple[int, int, int],
         latent_shape: tuple[int, int, int],
     ) -> float:
-        """
-        input_shape: (C, H, W)
-        latent_shape: (C_latent, H_latent, W_latent)
-        """
         c, h, w = input_shape
         cz, hz, wz = latent_shape
         return (c * h * w) / (cz * hz * wz)

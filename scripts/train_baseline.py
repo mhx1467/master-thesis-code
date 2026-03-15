@@ -1,37 +1,34 @@
 from pathlib import Path
-import sys
+import os
+
 import torch
+import wandb
 
 from hsi_compression.data import build_dataset, build_dataloader
-from hsi_compression.engine import train_one_epoch, validate
+from hsi_compression.engine import fit
+from hsi_compression.metrics import masked_mse
 from hsi_compression.models import Baseline2DAutoencoder
 from hsi_compression.paths import ensure_artifact_dirs, checkpoints_dir
 from hsi_compression.utils import set_seed
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python train_baseline.py <dataset_root_path>")
-        sys.exit(1)
-
-    dataset_root = Path(sys.argv[1])
-    if not dataset_root.exists():
-        print(f"Error: Provided dataset root path does not exist: {dataset_root}")
-        print("Example usage: python train_baseline.py /path/to/dataset")
-        sys.exit(1)
-
-
     config = {
         "seed": 42,
-        "dataset_root": dataset_root,
+        "dataset_root": os.environ.get(
+            "DATASET_ROOT",
+            "/home/brwsx/hsi-compression/pipelines/pull-dataset/hyspectnet-11k/hyspecnet-11k-full",
+        ),
         "difficulty": "easy",
         "batch_size": 4,
-        "num_workers": 0,
+        "num_workers": 4,
         "epochs": 20,
         "lr": 1e-3,
         "drop_invalid_channels": False,
         "hidden_channels": (128, 64),
         "latent_channels": 16,
+        "model_name": "baseline_2d_ae",
+        "loss_name": "masked_mse",
     }
 
     set_seed(config["seed"])
@@ -84,63 +81,55 @@ def main():
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
+    loss_fn = masked_mse
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,}")
 
-    best_val_loss = float("inf")
-    best_ckpt_path = checkpoints_dir() / "baseline_2d_ae_easy_best.pt"
+    config["device"] = str(device)
+    config["in_channels"] = in_channels
+    config["num_params"] = num_params
+    config["input_shape"] = (in_channels, 128, 128)
 
-    for epoch in range(1, config["epochs"] + 1):
-        train_metrics = train_one_epoch(
+    checkpoint_path = checkpoints_dir() / "baseline_2d_ae_easy_best.pt"
+
+    with wandb.init(
+        project="hsi-compression",
+        name=f"{config['model_name']}_{config['difficulty']}_latent{config['latent_channels']}",
+        config=config,
+    ) as run:
+        # Optional. Disable if it slows training too much.
+        # run.watch(model, log="gradients", log_freq=100)
+
+        result = fit(
             model=model,
-            loader=train_loader,
+            train_loader=train_loader,
+            val_loader=val_loader,
             optimizer=optimizer,
+            loss_fn=loss_fn,
             device=device,
+            epochs=config["epochs"],
+            checkpoint_path=checkpoint_path,
+            config=config,
+            logger=run,
+            scheduler=None,
         )
 
-        val_metrics = validate(
-            model=model,
-            loader=val_loader,
-            device=device,
+        # Upload best checkpoint as W&B artifact
+        artifact = wandb.Artifact(
+            name=f"{config['model_name']}-{run.id}",
+            type="model",
+            metadata={
+                "best_val_loss": result["best_val_loss"],
+                "difficulty": config["difficulty"],
+                "latent_channels": config["latent_channels"],
+            },
         )
+        artifact.add_file(str(checkpoint_path))
+        run.log_artifact(artifact)
 
-        latent_shape = val_metrics["latent_shape"]
-        ratio = model.compression_ratio_proxy(
-            input_shape=(in_channels, 128, 128),
-            latent_shape=latent_shape,
-        )
-
-        print(
-            f"Epoch {epoch:03d} | "
-            f"train_loss={train_metrics['train_loss']:.6f} | "
-            f"train_rmse={train_metrics['train_rmse']:.6f} | "
-            f"val_loss={val_metrics['val_loss']:.6f} | "
-            f"val_rmse={val_metrics['val_rmse']:.6f} | "
-            f"val_sam_deg={val_metrics['val_sam_deg']:.6f} | "
-            f"latent={latent_shape} | "
-            f"ratio≈{ratio:.2f}"
-        )
-
-        if val_metrics["val_loss"] < best_val_loss:
-            best_val_loss = val_metrics["val_loss"]
-
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "config": config,
-                    "best_val_loss": best_val_loss,
-                    "latent_shape": latent_shape,
-                    "compression_ratio_proxy": ratio,
-                },
-                best_ckpt_path,
-            )
-            print(f"  Saved best checkpoint to: {best_ckpt_path}")
-
-    print("Training complete.")
-    print(f"Best val loss: {best_val_loss:.6f}")
+        print("Training complete.")
+        print(f"Best val loss: {result['best_val_loss']:.6f}")
 
 
 if __name__ == "__main__":

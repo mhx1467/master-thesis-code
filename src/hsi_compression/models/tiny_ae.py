@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 
@@ -16,7 +17,10 @@ class TinyHSIAutoencoder(nn.Module):
             nn.Conv2d(128, bands, kernel_size=3, padding=1),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encoder(x)
         x_hat = self.decoder(z)
-        return x_hat
+        return {
+            "x_hat": x_hat,
+            "z": z,
+        }

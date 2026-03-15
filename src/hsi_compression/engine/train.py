@@ -1,12 +1,13 @@
 import torch
 
-from hsi_compression.metrics import masked_mse, masked_rmse
+from hsi_compression.metrics import masked_rmse
 
 
 def train_one_epoch(
     model,
     loader,
     optimizer,
+    loss_fn,
     device: torch.device,
 ):
     model.train()
@@ -21,8 +22,10 @@ def train_one_epoch(
 
         optimizer.zero_grad()
 
-        x_hat, z = model(x)
-        loss = masked_mse(x_hat, x, mask)
+        outputs = model(x)
+        x_hat = outputs["x_hat"]
+
+        loss = loss_fn(x_hat, x, mask)
         loss.backward()
         optimizer.step()
 
@@ -33,6 +36,6 @@ def train_one_epoch(
         num_batches += 1
 
     return {
-        "train_loss": total_loss / max(num_batches, 1),
-        "train_rmse": total_rmse / max(num_batches, 1),
+        "loss": total_loss / max(num_batches, 1),
+        "rmse": total_rmse / max(num_batches, 1),
     }
