@@ -150,18 +150,39 @@ def main():
     checkpoint_raw = torch.load(checkpoint_path, map_location="cpu")
     ckpt_config = checkpoint_raw.get("config", {})
 
-    model_name = args.model or ckpt_config.get("model_name")
+    # Support both old flat config and new nested YAML-style config
+    model_section = ckpt_config.get("model", {})
+    training_section = ckpt_config.get("training", {})
+    data_section = ckpt_config.get("data", {})
+
+    model_name = args.model or model_section.get("model_name") or ckpt_config.get("model_name")
     if model_name is None:
         print("Error: model name not found in checkpoint and not provided via --model")
         sys.exit(1)
 
-    loss_name = args.loss or ckpt_config.get("loss_name", "masked_mse")
-    difficulty = args.difficulty or ckpt_config.get("difficulty", "easy")
-    drop_invalid_channels = args.drop_invalid_channels or ckpt_config.get("drop_invalid_channels", False)
+    loss_name = (
+        args.loss
+        or training_section.get("loss_name")
+        or ckpt_config.get("loss_name", "masked_mse")
+    )
 
-    model_kwargs = ckpt_config.get("model_kwargs", {})
+    difficulty = (
+        args.difficulty
+        or data_section.get("difficulty")
+        or ckpt_config.get("difficulty", "easy")
+    )
+
+    drop_invalid_channels = (
+        args.drop_invalid_channels
+        or data_section.get("drop_invalid_channels", False)
+        or ckpt_config.get("drop_invalid_channels", False)
+    )
+
+    model_kwargs = model_section.get("model_kwargs", {})
     if not model_kwargs:
-        # backward-compatible fallback for older checkpoints
+        model_kwargs = ckpt_config.get("model_kwargs", {})
+
+    if not model_kwargs:
         model_kwargs = {
             "latent_channels": ckpt_config.get("latent_channels", 16),
             "hidden_channels": tuple(ckpt_config.get("hidden_channels", (128, 64))),
