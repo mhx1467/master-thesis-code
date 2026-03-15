@@ -3,6 +3,7 @@ from pathlib import Path
 from hsi_compression.engine.train import train_one_epoch
 from hsi_compression.engine.validate import validate_one_epoch
 from hsi_compression.engine.checkpointing import save_checkpoint
+from hsi_compression.utils.distributed import is_main_process
 
 
 def fit(
@@ -18,12 +19,17 @@ def fit(
     logger=None,
     scheduler=None,
     show_progress: bool = True,
+    train_sampler=None,
 ):
     best_val_loss = float("inf")
     history = []
 
     for epoch in range(1, epochs + 1):
-        print(f"\nEpoch {epoch}/{epochs}")
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+                    
+        if is_main_process():
+            print(f"\nEpoch {epoch}/{epochs}")
 
         train_metrics = train_one_epoch(
             model=model,
@@ -64,10 +70,12 @@ def fit(
             record["model/latent_h"] = latent_shape[1]
             record["model/latent_w"] = latent_shape[2]
 
-        if hasattr(model, "compression_ratio_proxy") and latent_shape is not None:
+        model_for_ratio = model.module if hasattr(model, "module") else model
+
+        if hasattr(model_for_ratio, "compression_ratio_proxy") and latent_shape is not None:
             input_shape = config.get("input_shape")
             if input_shape is not None:
-                ratio = model.compression_ratio_proxy(
+                ratio = model_for_ratio.compression_ratio_proxy(
                     input_shape=input_shape,
                     latent_shape=latent_shape,
                 )
@@ -75,17 +83,18 @@ def fit(
 
         history.append(record)
 
-        if logger is not None:
+        if logger is not None and is_main_process():
             logger.log(record, step=epoch)
 
-        print(
-            f"Epoch {epoch:03d} | "
-            f"train_loss={record['train/loss']:.6f} | "
-            f"train_rmse={record['train/rmse']:.6f} | "
-            f"val_loss={record['val/loss']:.6f} | "
-            f"val_rmse={record['val/rmse']:.6f} | "
-            f"val_sam_deg={record['val/sam_deg']:.6f}"
-        )
+        if is_main_process():
+            print(
+                f"Epoch {epoch:03d} | "
+                f"train_loss={record['train/loss']:.6f} | "
+                f"train_rmse={record['train/rmse']:.6f} | "
+                f"val_loss={record['val/loss']:.6f} | "
+                f"val_rmse={record['val/rmse']:.6f} | "
+                f"val_sam_deg={record['val/sam_deg']:.6f}"
+            )
 
         if record["val/loss"] < best_val_loss:
             best_val_loss = record["val/loss"]
@@ -96,23 +105,26 @@ def fit(
             if "model/compression_ratio_proxy" in record:
                 extra["compression_ratio_proxy"] = record["model/compression_ratio_proxy"]
 
-            save_checkpoint(
-                path=checkpoint_path,
-                epoch=epoch,
-                model=model,
-                optimizer=optimizer,
-                config=config,
-                best_val_loss=best_val_loss,
-                extra=extra,
-            )
+            if is_main_process():
+                model_to_save = model.module if hasattr(model, "module") else model
 
-            if logger is not None:
-                logger.summary["best_val_loss"] = best_val_loss
-                logger.summary["best_epoch"] = epoch
-                logger.summary["best_checkpoint_path"] = str(checkpoint_path)
+                save_checkpoint(
+                    path=checkpoint_path,
+                    epoch=epoch,
+                    model=model_to_save,
+                    optimizer=optimizer,
+                    config=config,
+                    best_val_loss=best_val_loss,
+                    extra=extra,
+                )
 
-                if "model/compression_ratio_proxy" in record:
-                    logger.summary["compression_ratio_proxy"] = record["model/compression_ratio_proxy"]
+                if logger is not None:
+                    logger.summary["best_val_loss"] = best_val_loss
+                    logger.summary["best_epoch"] = epoch
+                    logger.summary["best_checkpoint_path"] = str(checkpoint_path)
+
+                    if "model/compression_ratio_proxy" in record:
+                        logger.summary["compression_ratio_proxy"] = record["model/compression_ratio_proxy"]
 
     return {
         "best_val_loss": best_val_loss,

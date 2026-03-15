@@ -2,6 +2,7 @@ import torch
 from tqdm.auto import tqdm
 
 from hsi_compression.metrics import masked_rmse, masked_sam_deg
+from hsi_compression.utils.distributed import is_main_process, reduce_mean
 
 
 @torch.no_grad()
@@ -22,16 +23,18 @@ def validate_one_epoch(
     num_batches = 0
     latent_shape = None
 
+    use_progress = show_progress and is_main_process()
+
     progress = loader
-    if show_progress:
+    if use_progress:
         desc = "Val"
         if epoch is not None and total_epochs is not None:
             desc = f"Val {epoch}/{total_epochs}"
         progress = tqdm(loader, desc=desc, leave=False)
 
     for batch in progress:
-        x = batch["x"].to(device)
-        mask = batch["valid_mask"].to(device)
+        x = batch["x"].to(device, non_blocking=True)
+        mask = batch["valid_mask"].to(device, non_blocking=True)
 
         outputs = model(x)
         x_hat = outputs["x_hat"]
@@ -49,16 +52,24 @@ def validate_one_epoch(
         if latent_shape is None and z is not None:
             latent_shape = tuple(z.shape[1:])
 
-        if show_progress:
+        if use_progress:
             progress.set_postfix({
                 "loss": f"{loss.item():.4f}",
                 "rmse": f"{rmse.item():.4f}",
                 "sam": f"{sam_deg.item():.2f}",
             })
 
+    avg_loss = total_loss / max(num_batches, 1)
+    avg_rmse = total_rmse / max(num_batches, 1)
+    avg_sam_deg = total_sam_deg / max(num_batches, 1)
+
+    avg_loss = reduce_mean(avg_loss, device)
+    avg_rmse = reduce_mean(avg_rmse, device)
+    avg_sam_deg = reduce_mean(avg_sam_deg, device)
+
     return {
-        "loss": total_loss / max(num_batches, 1),
-        "rmse": total_rmse / max(num_batches, 1),
-        "sam_deg": total_sam_deg / max(num_batches, 1),
+        "loss": avg_loss,
+        "rmse": avg_rmse,
+        "sam_deg": avg_sam_deg,
         "latent_shape": latent_shape,
     }
