@@ -4,9 +4,12 @@ import sys
 from torch.utils.data import Subset
 
 from hsi_compression.data import build_dataset, build_dataloader
+from hsi_compression.utils import load_project_env
 
 
 def main():
+    load_project_env()
+
     if len(sys.argv) < 2:
         print("Usage: python check_normalization_subset.py <dataset_root_path>")
         sys.exit(1)

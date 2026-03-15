@@ -2,9 +2,12 @@ from pathlib import Path
 import sys
 
 from hsi_compression.data.datamodule import build_dataset
+from hsi_compression.utils import load_project_env
 
 
 def main():
+    load_project_env()
+
     if len(sys.argv) < 2:
         print("Usage: python inspect_raw_sample.py <dataset_root_path>")
         sys.exit(1)

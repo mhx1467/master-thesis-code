@@ -5,9 +5,12 @@ import torch
 from hsi_compression.data.datamodule import build_dataset
 from hsi_compression.stats import compute_band_stats
 from hsi_compression.paths import ensure_artifact_dirs, default_stats_path
+from hsi_compression.utils import load_project_env
 
 
 def main():
+    load_project_env()
+
     if len(sys.argv) < 2:
         print("Usage: python build_stats.py <dataset_root_path>")
         sys.exit(1)

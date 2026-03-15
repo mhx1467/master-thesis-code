@@ -54,6 +54,9 @@ if [[ "${PATH_TO_DATASET}" == "/" ]]; then
 fi
 
 DATASET_SOURCE="${PATH_TO_DATASET%/}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCAL_PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LOCAL_ENV_FILE="${LOCAL_PROJECT_ROOT}/.env"
 
 DATASET_SIZE_HUMAN="$(du -sh "${DATASET_SOURCE}" | awk '{print $1}')"
 echo "Dataset size: ${DATASET_SIZE_HUMAN}"
@@ -65,7 +68,7 @@ ssh -i "${PATH_TO_KEY}" "${REMOTE_USER}@${IP}" \
 echo "Syncing dataset directly to ${REMOTE_USER}@${IP}:/workspace/data/..."
 rsync -a --partial --append-verify --info=progress2 -e "ssh -i ${PATH_TO_KEY}" "${DATASET_SOURCE}" "${REMOTE_USER}@${IP}:/workspace/data/"
 
-echo "Configuring remote repository and DATASET_ROOT..."
+echo "Configuring remote repository..."
 ssh -i "${PATH_TO_KEY}" "${REMOTE_USER}@${IP}" << 'EOF'
 set -euo pipefail
 
@@ -76,29 +79,54 @@ if [[ ! -d hsi ]]; then
 else
 	echo "Repository /workspace/hsi already exists. Skipping clone."
 fi
+EOF
 
+if [[ -f "${LOCAL_ENV_FILE}" ]]; then
+	echo "Copying local .env to remote /workspace/hsi/.env..."
+	rsync -a --info=progress2 -e "ssh -i ${PATH_TO_KEY}" "${LOCAL_ENV_FILE}" "${REMOTE_USER}@${IP}:/workspace/hsi/.env"
+else
+	echo "No local .env found at ${LOCAL_ENV_FILE}. Remote .env will be created if missing."
+fi
+
+echo "Configuring remote environment variables..."
+ssh -i "${PATH_TO_KEY}" "${REMOTE_USER}@${IP}" << 'EOF'
+set -euo pipefail
+
+cd /workspace/hsi
+
+if [[ ! -f .env ]]; then
+	cat > .env << 'ENVVARS'
 DATASET_ROOT=/workspace/data/hyspectnet-11k/hyspecnet-11k-full/
-export DATASET_ROOT
+ENVVARS
+fi
 
-persist_env_var() {
+if ! grep -Eq '^DATASET_ROOT=' .env; then
+	echo 'DATASET_ROOT=/workspace/data/hyspectnet-11k/hyspecnet-11k-full/' >> .env
+fi
+
+chmod 600 .env
+
+persist_env_loader() {
 	local target_file="$1"
-	local export_line='export DATASET_ROOT=/workspace/data/hyspectnet-11k/hyspecnet-11k-full/'
 
 	touch "${target_file}"
-	if ! grep -Fq "${export_line}" "${target_file}"; then
-		echo "${export_line}" >> "${target_file}"
+	if ! grep -Fq '# hsi-env-loader' "${target_file}"; then
+		cat >> "${target_file}" << 'ENVLOADER'
+# hsi-env-loader
+if [ -f /workspace/hsi/.env ]; then
+  set -a
+  . /workspace/hsi/.env
+  set +a
+fi
+ENVLOADER
 	fi
 }
 
-persist_env_var "$HOME/.profile"
-persist_env_var "$HOME/.bashrc"
-persist_env_var "$HOME/.zshrc"
+persist_env_loader "$HOME/.profile"
+persist_env_loader "$HOME/.bashrc"
+persist_env_loader "$HOME/.zshrc"
 
-cat > /workspace/hsi/.env << 'ENVVARS'
-DATASET_ROOT=/workspace/data/hyspectnet-11k/hyspecnet-11k-full/
-ENVVARS
-
-echo "Wrote DATASET_ROOT to /workspace/hsi/.env and persisted it in shell startup files"
+echo "Remote .env secured and shell startup files configured to auto-load it"
 EOF
 
 echo "Dataset sync completed."

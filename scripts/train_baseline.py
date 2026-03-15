@@ -9,10 +9,13 @@ from hsi_compression.engine import fit
 from hsi_compression.metrics import masked_mse
 from hsi_compression.models import Baseline2DAutoencoder
 from hsi_compression.paths import ensure_artifact_dirs, checkpoints_dir
-from hsi_compression.utils import set_seed
+from hsi_compression.utils import load_project_env, set_seed
+from hsi_compression.utils.wandb_utils import init_wandb
 
 
 def main():
+    load_project_env()
+
     config = {
         "seed": 42,
         "dataset_root": os.environ.get(
@@ -93,14 +96,11 @@ def main():
 
     checkpoint_path = checkpoints_dir() / "baseline_2d_ae_easy_best.pt"
 
-    with wandb.init(
+    with init_wandb(
         project="hsi-compression",
-        name=f"{config['model_name']}_{config['difficulty']}_latent{config['latent_channels']}",
+        run_name=f"{config['model_name']}_{config['difficulty']}_latent{config['latent_channels']}",
         config=config,
     ) as run:
-        # Optional. Disable if it slows training too much.
-        # run.watch(model, log="gradients", log_freq=100)
-
         result = fit(
             model=model,
             train_loader=train_loader,
@@ -115,7 +115,6 @@ def main():
             scheduler=None,
         )
 
-        # Upload best checkpoint as W&B artifact
         artifact = wandb.Artifact(
             name=f"{config['model_name']}-{run.id}",
             type="model",
