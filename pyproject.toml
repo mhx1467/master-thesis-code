@@ -15,6 +15,7 @@ dependencies = [
     "wandb",
     "python-dotenv",
     "tqdm",
+    "pyyaml",
 ]
 
 [tool.setuptools]
