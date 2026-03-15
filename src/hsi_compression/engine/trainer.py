@@ -17,17 +17,23 @@ def fit(
     config: dict,
     logger=None,
     scheduler=None,
+    show_progress: bool = True,
 ):
     best_val_loss = float("inf")
     history = []
 
     for epoch in range(1, epochs + 1):
+        print(f"\nEpoch {epoch}/{epochs}")
+
         train_metrics = train_one_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
             loss_fn=loss_fn,
             device=device,
+            epoch=epoch,
+            total_epochs=epochs,
+            show_progress=show_progress,
         )
 
         val_metrics = validate_one_epoch(
@@ -35,6 +41,9 @@ def fit(
             loader=val_loader,
             loss_fn=loss_fn,
             device=device,
+            epoch=epoch,
+            total_epochs=epochs,
+            show_progress=show_progress,
         )
 
         if scheduler is not None:
@@ -55,7 +64,6 @@ def fit(
             record["model/latent_h"] = latent_shape[1]
             record["model/latent_w"] = latent_shape[2]
 
-        # Compression ratio proxy if the model provides it
         if hasattr(model, "compression_ratio_proxy") and latent_shape is not None:
             input_shape = config.get("input_shape")
             if input_shape is not None:

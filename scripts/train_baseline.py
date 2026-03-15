@@ -113,6 +113,7 @@ def main():
             config=config,
             logger=run,
             scheduler=None,
+            show_progress=True,
         )
 
         artifact = wandb.Artifact(
