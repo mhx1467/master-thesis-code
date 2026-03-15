@@ -26,17 +26,21 @@ def masked_psnr(
 
 def masked_sam(x_hat: torch.Tensor, x: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """
+    Compute SAM using only valid bands per pixel.
     x_hat, x, mask: (N, B, H, W)
-    SAM is computed only for pixels where all bands are valid.
     """
-    pixel_mask = mask.all(dim=1)  # (N, H, W)
-
     x_hat = x_hat.permute(0, 2, 3, 1)  # (N, H, W, B)
     x = x.permute(0, 2, 3, 1)
+    mask = mask.permute(0, 2, 3, 1)    # (N, H, W, B)
+
+    x_hat = x_hat * mask
+    x = x * mask
 
     dot = torch.sum(x_hat * x, dim=-1)
     norm_hat = torch.norm(x_hat, dim=-1)
     norm = torch.norm(x, dim=-1)
+
+    pixel_mask = mask.any(dim=-1)
 
     cos = dot / (norm_hat * norm + eps)
     cos = torch.clamp(cos, -1.0, 1.0)
