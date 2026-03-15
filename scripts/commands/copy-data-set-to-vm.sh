@@ -5,6 +5,7 @@ set -euo pipefail
 usage() {
 	echo "Usage: $0 <ip> <path_to_ssh_key> <path_to_dataset> [remote_user]"
 	echo "Example: $0 203.0.113.10 ~/.ssh/id_gpu ~/datasets/hsi brwsx"
+	echo "Optional env: SSH_PORT=2222"
 }
 
 if [[ "$#" -lt 3 || "$#" -gt 4 ]]; then
@@ -17,6 +18,7 @@ IP="$1"
 PATH_TO_KEY="$2"
 PATH_TO_DATASET="$3"
 REMOTE_USER="${4:-$USER}"
+SSH_PORT="${SSH_PORT:-22}"
 
 if [[ -z "${IP}" ]]; then
 	echo "IP address is required."
@@ -42,6 +44,11 @@ if [[ -z "${PATH_TO_DATASET}" ]]; then
 	exit 1
 fi
 
+if ! [[ "${SSH_PORT}" =~ ^[0-9]+$ ]] || [[ "${SSH_PORT}" -lt 1 || "${SSH_PORT}" -gt 65535 ]]; then
+	echo "Invalid SSH_PORT: ${SSH_PORT}"
+	exit 1
+fi
+
 if [[ ! -e "${PATH_TO_DATASET}" ]]; then
 	echo "Dataset path not found: ${PATH_TO_DATASET}"
 	usage
@@ -55,21 +62,21 @@ fi
 
 DATASET_SOURCE="${PATH_TO_DATASET%/}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOCAL_PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LOCAL_PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 LOCAL_ENV_FILE="${LOCAL_PROJECT_ROOT}/.env"
 
 DATASET_SIZE_HUMAN="$(du -sh "${DATASET_SOURCE}" | awk '{print $1}')"
 echo "Dataset size: ${DATASET_SIZE_HUMAN}"
 
 echo "Preparing remote /workspace directory on ${REMOTE_USER}@${IP}..."
-ssh -i "${PATH_TO_KEY}" "${REMOTE_USER}@${IP}" \
+ssh -i "${PATH_TO_KEY}" -p "${SSH_PORT}" "${REMOTE_USER}@${IP}" \
 	"sudo mkdir -p /workspace/data && sudo chmod --recursive 777 /workspace"
 
 echo "Syncing dataset directly to ${REMOTE_USER}@${IP}:/workspace/data/..."
-rsync -a --partial --append-verify --info=progress2 -e "ssh -i ${PATH_TO_KEY}" "${DATASET_SOURCE}" "${REMOTE_USER}@${IP}:/workspace/data/"
+rsync -a --partial --append-verify --info=progress2 -e "ssh -i ${PATH_TO_KEY} -p ${SSH_PORT}" "${DATASET_SOURCE}" "${REMOTE_USER}@${IP}:/workspace/data/"
 
 echo "Configuring remote repository..."
-ssh -i "${PATH_TO_KEY}" "${REMOTE_USER}@${IP}" << 'EOF'
+ssh -i "${PATH_TO_KEY}" -p "${SSH_PORT}" "${REMOTE_USER}@${IP}" << 'EOF'
 set -euo pipefail
 
 cd /workspace
@@ -83,13 +90,13 @@ EOF
 
 if [[ -f "${LOCAL_ENV_FILE}" ]]; then
 	echo "Copying local .env to remote /workspace/hsi/.env..."
-	rsync -a --info=progress2 -e "ssh -i ${PATH_TO_KEY}" "${LOCAL_ENV_FILE}" "${REMOTE_USER}@${IP}:/workspace/hsi/.env"
+	rsync -a --info=progress2 -e "ssh -i ${PATH_TO_KEY} -p ${SSH_PORT}" "${LOCAL_ENV_FILE}" "${REMOTE_USER}@${IP}:/workspace/hsi/.env"
 else
 	echo "No local .env found at ${LOCAL_ENV_FILE}. Remote .env will be created if missing."
 fi
 
 echo "Configuring remote environment variables..."
-ssh -i "${PATH_TO_KEY}" "${REMOTE_USER}@${IP}" << 'EOF'
+ssh -i "${PATH_TO_KEY}" -p "${SSH_PORT}" "${REMOTE_USER}@${IP}" << 'EOF'
 set -euo pipefail
 
 cd /workspace/hsi

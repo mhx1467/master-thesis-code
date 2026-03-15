@@ -5,6 +5,7 @@ set -euo pipefail
 usage() {
 	echo "Usage: $0 <ip> <path_to_ssh_key> [remote_user] [remote_project_dir] [python_version]"
 	echo "Example: $0 203.0.113.10 ~/.ssh/id_gpu brwsx /workspace/hsi 3.10"
+	echo "Optional env: SSH_PORT=2222"
 }
 
 if [[ "$#" -lt 2 || "$#" -gt 5 ]]; then
@@ -18,6 +19,7 @@ PATH_TO_KEY="$2"
 REMOTE_USER="${3:-$USER}"
 REMOTE_PROJECT_DIR="${4:-/workspace/hsi}"
 REQUESTED_PYTHON_VERSION="${5:-}"
+SSH_PORT="${SSH_PORT:-22}"
 
 if [[ -z "${IP}" ]]; then
 	echo "IP address is required."
@@ -36,6 +38,11 @@ if [[ ! -f "${PATH_TO_KEY}" ]]; then
 	exit 1
 fi
 
+if ! [[ "${SSH_PORT}" =~ ^[0-9]+$ ]] || [[ "${SSH_PORT}" -lt 1 || "${SSH_PORT}" -gt 65535 ]]; then
+	echo "Invalid SSH_PORT: ${SSH_PORT}"
+	exit 1
+fi
+
 if [[ -z "${REMOTE_PROJECT_DIR}" || "${REMOTE_PROJECT_DIR}" == "/" ]]; then
 	echo "Refusing to run with an empty project dir or '/'."
 	exit 1
@@ -43,7 +50,7 @@ fi
 
 echo "Preparing Python environment on ${REMOTE_USER}@${IP}:${REMOTE_PROJECT_DIR}..."
 
-ssh -i "${PATH_TO_KEY}" "${REMOTE_USER}@${IP}" \
+ssh -i "${PATH_TO_KEY}" -p "${SSH_PORT}" "${REMOTE_USER}@${IP}" \
 	"PROJECT_DIR='${REMOTE_PROJECT_DIR}' REQUESTED_PY='${REQUESTED_PYTHON_VERSION}' bash -se" << 'EOF'
 set -euo pipefail
 
@@ -157,16 +164,3 @@ echo "Pip: $(pip --version)"
 EOF
 
 echo "Remote python environment preparation completed successfully."
-
-echo "Installing NVIDIA driver tooling..."
-sudo apt update
-sudo apt install -y ubuntu-drivers-common
-
-echo "Recommended NVIDIA driver(s):"
-ubuntu-drivers devices
-
-echo "Installing recommended NVIDIA driver..."
-sudo ubuntu-drivers autoinstall
-
-echo "Rebooting to load NVIDIA kernel modules..."
-sudo reboot
