@@ -14,20 +14,29 @@ def fit(
     loss_fn,
     device,
     epochs: int,
-    checkpoint_path: str | Path,
+    checkpoint_path,
     config: dict,
     logger=None,
     scheduler=None,
-    show_progress: bool = True,
+    show_progress=True,
     train_sampler=None,
 ):
     best_val_loss = float("inf")
     history = []
 
+    training_cfg = config.get("training", {})
+    early_cfg = training_cfg.get("early_stopping", {})
+
+    early_enabled = early_cfg.get("enabled", False)
+    early_patience = early_cfg.get("patience", 5)
+    early_min_delta = early_cfg.get("min_delta", 0.0)
+
+    epochs_without_improvement = 0    
+
     for epoch in range(1, epochs + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
-                    
+
         if is_main_process():
             print(f"\nEpoch {epoch}/{epochs}")
 
@@ -96,8 +105,9 @@ def fit(
                 f"val_sam_deg={record['val/sam_deg']:.6f}"
             )
 
-        if record["val/loss"] < best_val_loss:
+        if record["val/loss"] < best_val_loss - early_min_delta:
             best_val_loss = record["val/loss"]
+            epochs_without_improvement = 0
 
             extra = {
                 "latent_shape": latent_shape,
@@ -125,6 +135,16 @@ def fit(
 
                     if "model/compression_ratio_proxy" in record:
                         logger.summary["compression_ratio_proxy"] = record["model/compression_ratio_proxy"]
+        else:
+            epochs_without_improvement += 1
+
+        if early_enabled and epochs_without_improvement >= early_patience:
+            if is_main_process():
+                print(
+                    f"Early stopping triggered after {epoch} epochs "
+                    f"(patience={early_patience})."
+                )
+            break        
 
     return {
         "best_val_loss": best_val_loss,
