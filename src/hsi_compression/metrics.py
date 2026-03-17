@@ -43,7 +43,7 @@ def masked_sam(x_hat: torch.Tensor, x: torch.Tensor, mask: torch.Tensor, eps: fl
     pixel_mask = mask.any(dim=-1)
 
     cos = dot / (norm_hat * norm + eps)
-    cos = torch.clamp(cos, -1.0, 1.0)
+    cos = torch.clamp(cos, -1.0 + 1e-7, 1.0 - 1e-7)
 
     sam = torch.acos(cos)
 
