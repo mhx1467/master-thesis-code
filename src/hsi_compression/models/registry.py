@@ -3,7 +3,6 @@ from hsi_compression.models import (
     Baseline2DAutoencoder,
     TCNHSIAutoencoder,
     TCNHSIAutoencoderV2,
-    MambaHSIAutoencoder
 )
 
 
@@ -44,20 +43,11 @@ def build_tcn_hsi_ae_v2(in_channels: int, **kwargs):
         dropout=kwargs.get("dropout", 0.0),
     )
 
-def build_mamba_hsi_ae(in_channels: int, **kwargs):
-    return MambaHSIAutoencoder(
-        in_channels=in_channels,
-        latent_channels=kwargs.get("latent_channels", 8),
-        d_model=kwargs.get("d_model", 64),
-        num_layers=kwargs.get("num_layers", 2),
-    )
-
 MODEL_REGISTRY = {
     "tiny_ae": build_tiny_ae,
     "baseline_2d_ae": build_baseline_2d_ae,
     "tcn_hsi_ae": build_tcn_hsi_ae,
     "tcn_hsi_ae_v2": build_tcn_hsi_ae_v2,
-    "mamba_hsi_ae": build_mamba_hsi_ae,
 }
 
 

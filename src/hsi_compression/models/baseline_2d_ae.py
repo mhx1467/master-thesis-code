@@ -7,8 +7,10 @@ class ConvBlock(nn.Module):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         )
 
@@ -66,7 +68,7 @@ class Baseline2DAutoencoder(nn.Module):
         x = self.up2(x)
         x = self.dec_block2(x)
         x_hat = self.out_conv(x)
-        return x_hat
+        return torch.sigmoid(x_hat)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
