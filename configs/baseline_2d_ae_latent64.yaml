@@ -4,22 +4,22 @@ experiment:
 
 data:
   difficulty: easy
-  batch_size: 16 
+  batch_size: 8
   num_workers: 4
   train_subset_size: null
   val_subset_size: null
   drop_invalid_channels: false
 
 training:
-  epochs: 100 
-  lr: 0.001
-  loss_name: hybrid_mse_sam
+  epochs: 50
+  lr: 0.0001
+  loss_name: masked_mse
   debug_reconstruction_stats: true
 
   early_stopping:
     enabled: true
-    patience: 15
-    min_delta: 0.00001  
+    patience: 8
+    min_delta: 0.00001
 
 model:
   model_name: baseline_2d_ae
