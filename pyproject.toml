@@ -16,6 +16,7 @@ dependencies = [
     "python-dotenv",
     "tqdm",
     "pyyaml",
+    "mamba_ssm"
 ]
 
 [project.scripts]
