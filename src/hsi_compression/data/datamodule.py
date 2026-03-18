@@ -1,12 +1,13 @@
 from pathlib import Path
+
 import torch
 from torch.utils.data import DataLoader
 
 from hsi_compression.constants import (
     DEFAULT_DIFFICULTY,
     DEFAULT_NUM_WORKERS,
-    WATER_VAPOR_BANDS,
     NODATA_VALUE,
+    WATER_VAPOR_BANDS,
 )
 from hsi_compression.datasets import HSITiffDataset
 from hsi_compression.paths import default_stats_path
