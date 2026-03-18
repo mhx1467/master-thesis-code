@@ -26,6 +26,7 @@ class Baseline2DAutoencoder(nn.Module):
     Latent after two downsamples:
       (N, latent_channels, 32, 32)
     """
+
     def __init__(
         self,
         in_channels: int = 224,
@@ -37,14 +38,16 @@ class Baseline2DAutoencoder(nn.Module):
         h1, h2 = hidden_channels
 
         self.enc_block1 = ConvBlock(in_channels, h1)
-        self.down1 = nn.Conv2d(h1, h1, kernel_size=4, stride=2, padding=1)   # 128 -> 64
+        self.down1 = nn.Conv2d(h1, h1, kernel_size=4, stride=2, padding=1)  # 128 -> 64
 
         self.enc_block2 = ConvBlock(h1, h2)
-        self.down2 = nn.Conv2d(h2, h2, kernel_size=4, stride=2, padding=1)   # 64 -> 32
+        self.down2 = nn.Conv2d(h2, h2, kernel_size=4, stride=2, padding=1)  # 64 -> 32
 
         self.bottleneck = nn.Conv2d(h2, latent_channels, kernel_size=3, padding=1)
 
-        self.up1 = nn.ConvTranspose2d(latent_channels, h2, kernel_size=4, stride=2, padding=1)  # 32 -> 64
+        self.up1 = nn.ConvTranspose2d(
+            latent_channels, h2, kernel_size=4, stride=2, padding=1
+        )  # 32 -> 64
         self.dec_block1 = ConvBlock(h2, h2)
 
         self.up2 = nn.ConvTranspose2d(h2, h1, kernel_size=4, stride=2, padding=1)  # 64 -> 128

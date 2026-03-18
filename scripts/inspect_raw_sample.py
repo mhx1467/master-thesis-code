@@ -1,5 +1,5 @@
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from hsi_compression.data.datamodule import build_dataset
 from hsi_compression.utils import load_project_env

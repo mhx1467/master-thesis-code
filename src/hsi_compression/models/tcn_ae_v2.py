@@ -6,6 +6,7 @@ class Chomp1d(nn.Module):
     """
     Removes extra right-side padding to preserve output length.
     """
+
     def __init__(self, chomp_size: int):
         super().__init__()
         self.chomp_size = chomp_size
@@ -13,7 +14,7 @@ class Chomp1d(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.chomp_size == 0:
             return x
-        return x[:, :, :-self.chomp_size]
+        return x[:, :, : -self.chomp_size]
 
 
 class TemporalBlock(nn.Module):
@@ -40,7 +41,6 @@ class TemporalBlock(nn.Module):
             Chomp1d(padding),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-
             nn.Conv1d(
                 out_channels,
                 out_channels,
@@ -80,7 +80,7 @@ class TCN1d(nn.Module):
         in_ch = input_channels
 
         for i in range(num_layers):
-            dilation = 2 ** i
+            dilation = 2**i
             layers.append(
                 TemporalBlock(
                     in_channels=in_ch,
@@ -127,6 +127,7 @@ class TCNHSIAutoencoderV2(nn.Module):
     Latent:
         (N, latent_channels, 32, 32)
     """
+
     def __init__(
         self,
         in_channels: int = 224,
@@ -163,15 +164,17 @@ class TCNHSIAutoencoderV2(nn.Module):
 
         # Spatial encoder
         self.enc_block1 = ConvBlock2d(in_channels, e1)
-        self.down1 = nn.Conv2d(e1, e1, kernel_size=4, stride=2, padding=1)   # 128 -> 64
+        self.down1 = nn.Conv2d(e1, e1, kernel_size=4, stride=2, padding=1)  # 128 -> 64
 
         self.enc_block2 = ConvBlock2d(e1, e2)
-        self.down2 = nn.Conv2d(e2, e2, kernel_size=4, stride=2, padding=1)   # 64 -> 32
+        self.down2 = nn.Conv2d(e2, e2, kernel_size=4, stride=2, padding=1)  # 64 -> 32
 
         self.bottleneck = nn.Conv2d(e2, latent_channels, kernel_size=3, padding=1)
 
         # Spatial decoder
-        self.up1 = nn.ConvTranspose2d(latent_channels, e2, kernel_size=4, stride=2, padding=1)  # 32 -> 64
+        self.up1 = nn.ConvTranspose2d(
+            latent_channels, e2, kernel_size=4, stride=2, padding=1
+        )  # 32 -> 64
         self.dec_block1 = ConvBlock2d(e2, e2)
 
         self.up2 = nn.ConvTranspose2d(e2, e1, kernel_size=4, stride=2, padding=1)  # 64 -> 128

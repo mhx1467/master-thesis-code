@@ -19,6 +19,11 @@ dependencies = [
     "mamba_ssm"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.2.1",
+]
+
 [project.scripts]
 hsi-vm = "hsi_compression.vm_cli:main"
 
@@ -27,3 +32,34 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+include = ["*.py", "*.pyi"]
+extend-exclude = [".venv", "artifacts", "notebooks"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "ARG",  # flake8-unused-arguments
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "W505",  # doc line too long
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["hsi_compression"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+include = '\.pyi?$'
+extend-exclude = '/(\.venv|artifacts|notebooks)/'

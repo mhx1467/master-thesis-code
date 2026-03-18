@@ -10,7 +10,6 @@ import yaml
 
 from hsi_compression.paths import project_root
 
-
 DEFAULT_VM_CONFIG = project_root() / "configs" / "vms.yaml"
 COMMAND_SCRIPTS = {
     "copy-dataset": project_root() / "scripts" / "commands" / "copy-data-set-to-vm.sh",
@@ -28,7 +27,7 @@ def _load_config(config_path: Path) -> list[dict]:
             f"VM config does not exist: {config_path}. Create it from configs/vms.yaml template."
         )
 
-    with open(config_path, "r", encoding="utf-8") as handle:
+    with open(config_path, encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
 
     if not isinstance(raw, dict) or "vms" not in raw:
@@ -217,7 +216,9 @@ def build_parser() -> argparse.ArgumentParser:
     ssh_parser = subparsers.add_parser("ssh", help="Open an SSH session to a VM")
     ssh_parser.add_argument("name", help="VM name")
     ssh_parser.add_argument("--user", help="Override remote user")
-    ssh_parser.add_argument("--dry-run", action="store_true", help="Print command without executing")
+    ssh_parser.add_argument(
+        "--dry-run", action="store_true", help="Print command without executing"
+    )
     ssh_parser.set_defaults(func=cmd_ssh)
 
     run_parser = subparsers.add_parser("run", help="Run a predefined command for a VM")
@@ -231,7 +232,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--dataset-path", help="Required for copy-dataset if not set in config")
     run_parser.add_argument("--remote-project-dir", help="Override remote project directory")
     run_parser.add_argument("--python-version", help="Python version for prepare-environment")
-    run_parser.add_argument("--dry-run", action="store_true", help="Print command without executing")
+    run_parser.add_argument(
+        "--dry-run", action="store_true", help="Print command without executing"
+    )
     run_parser.set_defaults(func=cmd_run)
 
     return parser

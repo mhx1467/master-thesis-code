@@ -1,30 +1,27 @@
-from pathlib import Path
+import argparse
 import os
 import sys
-import argparse
+from pathlib import Path
 
 import torch
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Subset
 from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
 
-from hsi_compression.data import build_dataset, build_dataloader
+from hsi_compression.data import build_dataloader, build_dataset
 from hsi_compression.engine import fit
 from hsi_compression.losses import build_loss
 from hsi_compression.models.registry import build_model
-from hsi_compression.paths import ensure_artifact_dirs, checkpoints_dir
-from hsi_compression.constants import CLEAN_BAND_COUNT
+from hsi_compression.paths import checkpoints_dir, ensure_artifact_dirs
 from hsi_compression.utils import (
+    cleanup_distributed,
+    get_git_short_hash,
+    is_git_dirty,
+    is_main_process,
     load_config,
     load_project_env,
     set_seed,
-    get_git_commit_hash,
-    get_git_short_hash,
-    is_git_dirty,
     setup_distributed,
-    cleanup_distributed,
-    is_main_process,
-    barrier,
 )
 from hsi_compression.utils.wandb_utils import init_wandb
 
@@ -48,15 +45,13 @@ def main():
         cfg = load_config(args.config)
 
         experiment_cfg = cfg.get("experiment", {})
-        data_cfg       = cfg.get("data", {})
-        training_cfg   = cfg.get("training", {})
-        model_cfg      = cfg.get("model", {})
-        logging_cfg    = cfg.get("logging", {})
+        data_cfg = cfg.get("data", {})
+        training_cfg = cfg.get("training", {})
+        model_cfg = cfg.get("model", {})
+        logging_cfg = cfg.get("logging", {})
 
         dataset_root = Path(
-            args.dataset_root
-            or os.environ.get("DATASET_ROOT")
-            or "/data/hyspecnet-11k"
+            args.dataset_root or os.environ.get("DATASET_ROOT") or "/data/hyspecnet-11k"
         )
         if not dataset_root.exists():
             if is_main_process():
@@ -67,32 +62,36 @@ def main():
         set_seed(seed + rank)
         ensure_artifact_dirs()
 
-        device = torch.device(f"cuda:{local_rank}") if distributed else (
-            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        device = (
+            torch.device(f"cuda:{local_rank}")
+            if distributed
+            else (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
         )
 
         if is_main_process():
             print(f"Device: {device} | World size: {world_size}")
 
-        difficulty          = data_cfg.get("difficulty", "easy")
-        batch_size          = data_cfg.get("batch_size", 16)
-        num_workers         = data_cfg.get("num_workers", 4)
-        drop_invalid        = data_cfg.get("drop_invalid_channels", True)
-        train_subset        = data_cfg.get("train_subset_size", None)
-        val_subset          = data_cfg.get("val_subset_size", None)
+        difficulty = data_cfg.get("difficulty", "easy")
+        batch_size = data_cfg.get("batch_size", 16)
+        num_workers = data_cfg.get("num_workers", 4)
+        drop_invalid = data_cfg.get("drop_invalid_channels", True)
+        train_subset = data_cfg.get("train_subset_size", None)
+        val_subset = data_cfg.get("val_subset_size", None)
 
-        epochs              = training_cfg.get("epochs", 500)
-        lr                  = training_cfg.get("lr", 1e-4)
-        loss_name           = training_cfg.get("loss_name", "mse")
-        grad_clip           = training_cfg.get("grad_clip_max_norm", 1.0)
-        quantization_bits   = training_cfg.get("quantization_bits", 8)
+        epochs = training_cfg.get("epochs", 500)
+        lr = training_cfg.get("lr", 1e-4)
+        loss_name = training_cfg.get("loss_name", "mse")
+        grad_clip = training_cfg.get("grad_clip_max_norm", 1.0)
+        quantization_bits = training_cfg.get("quantization_bits", 8)
 
-        scheduler_cfg       = training_cfg.get("scheduler", {})
+        scheduler_cfg = training_cfg.get("scheduler", {})
 
         if is_main_process():
-            print(f"\nDataset: {difficulty} split | "
-                  f"drop_invalid_channels={drop_invalid} | "
-                  f"normalization: global min-max [0,1]")
+            print(
+                f"\nDataset: {difficulty} split | "
+                f"drop_invalid_channels={drop_invalid} | "
+                f"normalization: global min-max [0,1]"
+            )
 
         train_ds = build_dataset(
             dataset_root=dataset_root,
@@ -120,24 +119,25 @@ def main():
         num_input_bands = sample_x.shape[0]
 
         if is_main_process():
-            print(f"Input bands: {num_input_bands} | "
-                  f"Train: {len(train_ds)} | Val: {len(val_ds)}")
+            print(f"Input bands: {num_input_bands} | Train: {len(train_ds)} | Val: {len(val_ds)}")
 
         train_sampler = DistributedSampler(train_ds, shuffle=True) if distributed else None
 
         train_loader = build_dataloader(
-            train_ds, batch_size=batch_size,
+            train_ds,
+            batch_size=batch_size,
             shuffle=(train_sampler is None),
             num_workers=num_workers,
             sampler=train_sampler,
         )
         val_loader = build_dataloader(
-            val_ds, batch_size=batch_size,
+            val_ds,
+            batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
         )
 
-        model_name   = model_cfg.get("model_name")
+        model_name = model_cfg.get("model_name")
         model_kwargs = model_cfg.get("model_kwargs", {})
 
         model_kwargs["in_channels"] = num_input_bands
@@ -210,8 +210,8 @@ def main():
             result = _run_training(logger=None)
 
         if is_main_process():
-            print(f"\n{'='*60}")
-            print(f"Training completed.")
+            print(f"\n{'=' * 60}")
+            print("Training completed.")
             print(f"Best val/psnr: {result['best_val_psnr']:.2f} dB")
             print(f"Checkpoint: {ckpt_path}")
 

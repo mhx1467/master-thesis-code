@@ -10,7 +10,7 @@ class MSELoss(nn.Module):
         self,
         x_hat: torch.Tensor,
         x: torch.Tensor,
-        mask: torch.Tensor | None = None,
+        mask: torch.Tensor,
     ) -> torch.Tensor:
         return F.mse_loss(x_hat, x)
 
@@ -44,9 +44,7 @@ class MaskedHybridLoss(nn.Module):
         pixel_mask = mask_p.all(dim=-1)
 
         if pixel_mask.any():
-            cos = F.cosine_similarity(
-                x_hat_p[pixel_mask], x_p[pixel_mask], dim=-1, eps=1e-8
-            )
+            cos = F.cosine_similarity(x_hat_p[pixel_mask], x_p[pixel_mask], dim=-1, eps=1e-8)
             spectral_loss = (1.0 - cos.clamp(-1.0, 1.0)).mean()
         else:
             spectral_loss = torch.tensor(0.0, device=x.device)
@@ -55,7 +53,7 @@ class MaskedHybridLoss(nn.Module):
 
 
 LOSS_REGISTRY = {
-    "mse":        MSELoss(),
+    "mse": MSELoss(),
     "masked_mse": MaskedMSELoss(),
     "hybrid_mse_sam": MaskedHybridLoss(alpha=0.1),
 }
@@ -64,7 +62,6 @@ LOSS_REGISTRY = {
 def build_loss(loss_name: str) -> nn.Module:
     if loss_name not in LOSS_REGISTRY:
         raise ValueError(
-            f"Unknown loss name: '{loss_name}'. "
-            f"Available: {list(LOSS_REGISTRY.keys())}"
+            f"Unknown loss name: '{loss_name}'. Available: {list(LOSS_REGISTRY.keys())}"
         )
     return LOSS_REGISTRY[loss_name]

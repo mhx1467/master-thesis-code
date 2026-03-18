@@ -1,7 +1,7 @@
+from .checkpointing import load_checkpoint, save_checkpoint
 from .train import train_one_epoch
-from .validate import validate_one_epoch
-from .checkpointing import save_checkpoint, load_checkpoint
 from .trainer import fit
+from .validate import validate_one_epoch
 
 __all__ = [
     "train_one_epoch",

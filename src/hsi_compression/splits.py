@@ -1,4 +1,5 @@
 from pathlib import Path
+
 import pandas as pd
 
 
@@ -47,8 +48,7 @@ def resolve_split_paths(
     missing = [p for p in paths if not p.exists()]
     if missing:
         raise FileNotFoundError(
-            f"{len(missing)} resolved spectral files do not exist. "
-            f"First missing: {missing[0]}"
+            f"{len(missing)} resolved spectral files do not exist. First missing: {missing[0]}"
         )
 
     return paths

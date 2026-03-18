@@ -1,7 +1,7 @@
 import torch
 from tqdm.auto import tqdm
 
-from hsi_compression.metrics import masked_rmse, masked_psnr
+from hsi_compression.metrics import masked_psnr, masked_rmse
 from hsi_compression.utils.distributed import is_main_process, reduce_mean
 
 
@@ -42,9 +42,7 @@ def train_one_epoch(
         loss.backward()
 
         if grad_clip_max_norm > 0.0:
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), max_norm=grad_clip_max_norm
-            )
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
 
         optimizer.step()
 
@@ -58,10 +56,12 @@ def train_one_epoch(
         num_batches += 1
 
         if use_progress:
-            progress.set_postfix({
-                "loss": f"{loss.item():.5f}",
-                "psnr": f"{psnr_val.item():.2f}",
-            })
+            progress.set_postfix(
+                {
+                    "loss": f"{loss.item():.5f}",
+                    "psnr": f"{psnr_val.item():.2f}",
+                }
+            )
 
     n = max(num_batches, 1)
     return {

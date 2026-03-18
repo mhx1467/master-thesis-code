@@ -1,13 +1,13 @@
-from .rgb import hsi_to_rgb, plot_rgb, plot_rgb_comparison, save_rgb, choose_evenly_spaced_rgb_bands
+from .rgb import choose_evenly_spaced_rgb_bands, hsi_to_rgb, plot_rgb, plot_rgb_comparison, save_rgb
 from .spectra import (
     extract_spectrum,
     mean_spectrum,
-    plot_spectrum,
+    plot_mean_spectrum,
+    plot_mean_spectrum_comparison,
     plot_pixel_spectra,
     plot_random_spectra,
-    plot_mean_spectrum,
+    plot_spectrum,
     plot_spectrum_comparison,
-    plot_mean_spectrum_comparison,
 )
 
 __all__ = [
