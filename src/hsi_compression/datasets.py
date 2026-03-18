@@ -1,8 +1,9 @@
 from pathlib import Path
+
 import numpy as np
+import tifffile as tiff
 import torch
 from torch.utils.data import Dataset
-import tifffile as tiff
 
 
 class HSITiffDataset(Dataset):
@@ -37,7 +38,7 @@ class HSITiffDataset(Dataset):
         if x.ndim != 3:
             raise ValueError(f"Expected 3D tensor, got shape {x.shape} for {path}")
 
-        valid_mask = (x != self.nodata_value)
+        valid_mask = x != self.nodata_value
 
         # Known dataset-invalid bands
         if self.invalid_channels:

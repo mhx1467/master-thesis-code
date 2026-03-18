@@ -1,12 +1,13 @@
 from pathlib import Path
+
 import torch
 from torch.utils.data import DataLoader
 
 from hsi_compression.constants import (
     DEFAULT_DIFFICULTY,
     DEFAULT_NUM_WORKERS,
-    WATER_VAPOR_BANDS,
     NODATA_VALUE,
+    WATER_VAPOR_BANDS,
 )
 from hsi_compression.datasets import HSITiffDataset
 from hsi_compression.paths import default_stats_path
@@ -29,11 +30,7 @@ def build_dataset(
 
     transform = None
     if normalized:
-        stats_path = (
-            Path(stats_path)
-            if stats_path is not None
-            else default_stats_path(difficulty)
-        )
+        stats_path = Path(stats_path) if stats_path is not None else default_stats_path(difficulty)
         if not stats_path.exists():
             raise FileNotFoundError(
                 f"No stats file found: {stats_path}\n"

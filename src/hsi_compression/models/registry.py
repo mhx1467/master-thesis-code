@@ -1,8 +1,8 @@
 from hsi_compression.models import (
-    TinyHSIAutoencoder,
     Baseline2DAutoencoder,
     TCNHSIAutoencoder,
     TCNHSIAutoencoderV2,
+    TinyHSIAutoencoder,
 )
 
 
@@ -32,6 +32,7 @@ def build_tcn_hsi_ae(in_channels: int, **kwargs):
         dropout=kwargs.get("dropout", 0.0),
     )
 
+
 def build_tcn_hsi_ae_v2(in_channels: int, **kwargs):
     return TCNHSIAutoencoderV2(
         in_channels=in_channels,
@@ -42,6 +43,7 @@ def build_tcn_hsi_ae_v2(in_channels: int, **kwargs):
         latent_channels=kwargs.get("latent_channels", 8),
         dropout=kwargs.get("dropout", 0.0),
     )
+
 
 MODEL_REGISTRY = {
     "tiny_ae": build_tiny_ae,
@@ -54,7 +56,6 @@ MODEL_REGISTRY = {
 def build_model(model_name: str, in_channels: int, **kwargs):
     if model_name not in MODEL_REGISTRY:
         raise ValueError(
-            f"Unknown model_name: {model_name}. "
-            f"Available: {list(MODEL_REGISTRY.keys())}"
+            f"Unknown model_name: {model_name}. Available: {list(MODEL_REGISTRY.keys())}"
         )
     return MODEL_REGISTRY[model_name](in_channels=in_channels, **kwargs)

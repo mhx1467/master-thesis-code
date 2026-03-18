@@ -9,7 +9,7 @@ def psnr(
     eps: float = 1e-12,
 ) -> torch.Tensor:
     mse = torch.mean((x_hat - x) ** 2)
-    return 10.0 * torch.log10(torch.tensor(data_range ** 2, device=x.device) / (mse + eps))
+    return 10.0 * torch.log10(torch.tensor(data_range**2, device=x.device) / (mse + eps))
 
 
 def masked_psnr(
@@ -20,7 +20,7 @@ def masked_psnr(
     eps: float = 1e-12,
 ) -> torch.Tensor:
     mse = masked_mse(x_hat, x, mask, eps=eps)
-    return 10.0 * torch.log10(torch.tensor(data_range ** 2, device=x.device) / (mse + eps))
+    return 10.0 * torch.log10(torch.tensor(data_range**2, device=x.device) / (mse + eps))
 
 
 def mse(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -109,6 +109,6 @@ def estimate_bpppc(
     quantization_bits: int = 8,
 ) -> float:
     patch_pixels = 128 * 128
-    latent_elements = latent[0].numel()           # C_l x H_l x W_l per patch
+    latent_elements = latent[0].numel()  # C_l x H_l x W_l per patch
     latent_bits = latent_elements * quantization_bits
     return latent_bits / (patch_pixels * num_bands)

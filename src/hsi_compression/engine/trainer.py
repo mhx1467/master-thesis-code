@@ -1,6 +1,6 @@
+from hsi_compression.engine.checkpointing import save_checkpoint
 from hsi_compression.engine.train import train_one_epoch
 from hsi_compression.engine.validate import validate_one_epoch
-from hsi_compression.engine.checkpointing import save_checkpoint
 from hsi_compression.utils.distributed import is_main_process
 
 
@@ -20,14 +20,14 @@ def fit(
     train_sampler=None,
     grad_clip_max_norm: float = 1.0,
     num_input_bands: int = 202,
-    quantization_bits: int = 8, 
+    quantization_bits: int = 8,
 ):
     best_val_psnr = float("-inf")
     history = []
 
     training_cfg = config.get("training", {})
     early_cfg = training_cfg.get("early_stopping", {})
-    early_enabled  = early_cfg.get("enabled", False)
+    early_enabled = early_cfg.get("enabled", False)
     early_patience = early_cfg.get("patience", 20)
     early_min_delta = early_cfg.get("min_delta", 0.0)
     epochs_without_improvement = 0
@@ -78,22 +78,24 @@ def fit(
             )
 
         record = {
-            "epoch":              epoch,
-            "train/loss":         train_metrics["loss"],
-            "train/rmse":         train_metrics["rmse"],
-            "train/psnr":         train_metrics["psnr"],
-            "val/loss":           val_metrics["loss"],
-            "val/rmse":           val_metrics["rmse"],
-            "val/psnr":           val_metrics["psnr"],
-            "val/sam_deg":        val_metrics["sam_deg"],
-            "val/bpppc":          val_metrics["bpppc"],
+            "epoch": epoch,
+            "train/loss": train_metrics["loss"],
+            "train/rmse": train_metrics["rmse"],
+            "train/psnr": train_metrics["psnr"],
+            "val/loss": val_metrics["loss"],
+            "val/rmse": val_metrics["rmse"],
+            "val/psnr": val_metrics["psnr"],
+            "val/sam_deg": val_metrics["sam_deg"],
+            "val/bpppc": val_metrics["bpppc"],
         }
         if latent_shape:
-            record.update({
-                "model/latent_c": latent_shape[0],
-                "model/latent_h": latent_shape[1],
-                "model/latent_w": latent_shape[2],
-            })
+            record.update(
+                {
+                    "model/latent_c": latent_shape[0],
+                    "model/latent_h": latent_shape[1],
+                    "model/latent_w": latent_shape[2],
+                }
+            )
         if cr_proxy is not None:
             record["model/cr_proxy"] = cr_proxy
 
@@ -138,9 +140,9 @@ def fit(
                 )
 
                 if logger is not None:
-                    logger.summary["best_val_psnr"]  = best_val_psnr
+                    logger.summary["best_val_psnr"] = best_val_psnr
                     logger.summary["best_val_bpppc"] = record["val/bpppc"]
-                    logger.summary["best_epoch"]     = epoch
+                    logger.summary["best_epoch"] = epoch
         else:
             epochs_without_improvement += 1
 

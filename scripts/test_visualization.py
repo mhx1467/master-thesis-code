@@ -11,10 +11,10 @@ from hsi_compression.models.registry import build_model
 from hsi_compression.paths import checkpoints_dir
 from hsi_compression.utils.env import load_project_env
 from hsi_compression.visualization import (
-    hsi_to_rgb,
     choose_evenly_spaced_rgb_bands,
-    plot_random_spectra,
+    hsi_to_rgb,
     plot_mean_spectrum_comparison,
+    plot_random_spectra,
 )
 
 
@@ -22,9 +22,7 @@ def main():
     load_project_env()
 
     if len(sys.argv) < 2:
-        print(
-            "Usage: python test_visualization.py <dataset_root_path> [checkpoint_path]"
-        )
+        print("Usage: python test_visualization.py <dataset_root_path> [checkpoint_path]")
         sys.exit(1)
 
     dataset_root = Path(sys.argv[1])
@@ -33,9 +31,7 @@ def main():
         sys.exit(1)
 
     checkpoint_path = (
-        Path(sys.argv[2])
-        if len(sys.argv) >= 3
-        else checkpoints_dir() / "baseline_2d_ae_full.pt"
+        Path(sys.argv[2]) if len(sys.argv) >= 3 else checkpoints_dir() / "baseline_2d_ae_full.pt"
     )
     if not checkpoint_path.exists():
         print(f"Error: checkpoint does not exist: {checkpoint_path}")
@@ -56,14 +52,14 @@ def main():
     sample = dataset[idx]
 
     if isinstance(sample, dict):
-        x = sample["x"]          # [C, H, W]
+        x = sample["x"]  # [C, H, W]
         mask = sample.get("mask", None)
     else:
         x = sample
         mask = None
 
     in_channels = x.shape[0]
-    x = x.unsqueeze(0).to(device)   # [1, C, H, W]
+    x = x.unsqueeze(0).to(device)  # [1, C, H, W]
 
     print("Selected sample:", idx)
     print("Input shape:", x.shape)
@@ -92,10 +88,7 @@ def main():
     with torch.no_grad():
         output = model(x)
 
-    if isinstance(output, dict):
-        x_hat = output["x_hat"]
-    else:
-        x_hat = output
+    x_hat = output["x_hat"] if isinstance(output, dict) else output
 
     x = x[0].cpu()
     x_hat = x_hat[0].cpu()

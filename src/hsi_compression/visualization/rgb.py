@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from typing import Iterable, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-
-ArrayLike = Union[np.ndarray, torch.Tensor]
+ArrayLike = np.ndarray | torch.Tensor
 
 
 def _to_numpy(x: ArrayLike) -> np.ndarray:
@@ -16,7 +15,7 @@ def _to_numpy(x: ArrayLike) -> np.ndarray:
     return np.asarray(x)
 
 
-def _ensure_chw(x: np.ndarray, channel_first: Optional[bool] = None) -> np.ndarray:
+def _ensure_chw(x: np.ndarray, channel_first: bool | None = None) -> np.ndarray:
     if x.ndim != 3:
         raise ValueError(f"Expected 3D array, got shape={x.shape}")
 
@@ -37,7 +36,7 @@ def _ensure_chw(x: np.ndarray, channel_first: Optional[bool] = None) -> np.ndarr
 
 def _normalize_channel(
     channel: np.ndarray,
-    mask: Optional[np.ndarray] = None,
+    mask: np.ndarray | None = None,
     p_low: float = 2.0,
     p_high: float = 98.0,
     eps: float = 1e-8,
@@ -70,10 +69,10 @@ def _apply_gamma(rgb: np.ndarray, gamma: float = 1.0) -> np.ndarray:
 
 def hsi_to_rgb(
     x: ArrayLike,
-    bands: Tuple[int, int, int] = (30, 20, 10),
-    channel_first: Optional[bool] = None,
-    mask: Optional[ArrayLike] = None,
-    percentile_stretch: Tuple[float, float] = (2.0, 98.0),
+    bands: tuple[int, int, int] = (30, 20, 10),
+    channel_first: bool | None = None,
+    mask: ArrayLike | None = None,
+    percentile_stretch: tuple[float, float] = (2.0, 98.0),
     gamma: float = 1.0,
 ) -> np.ndarray:
     x_np = _to_numpy(x)
@@ -106,14 +105,14 @@ def hsi_to_rgb(
 
 def plot_rgb(
     x: ArrayLike,
-    bands: Tuple[int, int, int] = (30, 20, 10),
-    channel_first: Optional[bool] = None,
-    mask: Optional[ArrayLike] = None,
-    percentile_stretch: Tuple[float, float] = (2.0, 98.0),
+    bands: tuple[int, int, int] = (30, 20, 10),
+    channel_first: bool | None = None,
+    mask: ArrayLike | None = None,
+    percentile_stretch: tuple[float, float] = (2.0, 98.0),
     gamma: float = 1.0,
-    title: Optional[str] = None,
-    figsize: Tuple[int, int] = (6, 6),
-    ax: Optional[plt.Axes] = None,
+    title: str | None = None,
+    figsize: tuple[int, int] = (6, 6),
+    ax: plt.Axes | None = None,
     show: bool = True,
 ) -> plt.Axes:
     rgb = hsi_to_rgb(
@@ -145,15 +144,15 @@ def plot_rgb(
 def plot_rgb_comparison(
     x_true: ArrayLike,
     x_pred: ArrayLike,
-    bands: Tuple[int, int, int] = (30, 20, 10),
-    channel_first: Optional[bool] = None,
-    mask: Optional[ArrayLike] = None,
-    percentile_stretch: Tuple[float, float] = (2.0, 98.0),
+    bands: tuple[int, int, int] = (30, 20, 10),
+    channel_first: bool | None = None,
+    mask: ArrayLike | None = None,
+    percentile_stretch: tuple[float, float] = (2.0, 98.0),
     gamma: float = 1.0,
-    titles: Tuple[str, str] = ("Input", "Reconstruction"),
-    figsize: Tuple[int, int] = (12, 5),
+    titles: tuple[str, str] = ("Input", "Reconstruction"),
+    figsize: tuple[int, int] = (12, 5),
     show: bool = True,
-) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+) -> tuple[plt.Figure, Sequence[plt.Axes]]:
     rgb_true = hsi_to_rgb(
         x_true,
         bands=bands,
@@ -191,10 +190,10 @@ def plot_rgb_comparison(
 def save_rgb(
     path: str,
     x: ArrayLike,
-    bands: Tuple[int, int, int] = (30, 20, 10),
-    channel_first: Optional[bool] = None,
-    mask: Optional[ArrayLike] = None,
-    percentile_stretch: Tuple[float, float] = (2.0, 98.0),
+    bands: tuple[int, int, int] = (30, 20, 10),
+    channel_first: bool | None = None,
+    mask: ArrayLike | None = None,
+    percentile_stretch: tuple[float, float] = (2.0, 98.0),
     gamma: float = 1.0,
     dpi: int = 150,
 ) -> None:
@@ -215,7 +214,7 @@ def save_rgb(
     plt.close()
 
 
-def choose_evenly_spaced_rgb_bands(num_bands: int) -> Tuple[int, int, int]:
+def choose_evenly_spaced_rgb_bands(num_bands: int) -> tuple[int, int, int]:
     if num_bands < 3:
         raise ValueError("num_bands must be >= 3")
 

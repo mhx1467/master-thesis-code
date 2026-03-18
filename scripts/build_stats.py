@@ -1,31 +1,25 @@
-from pathlib import Path
-import sys
 import argparse
+import sys
+from pathlib import Path
+
 import torch
 
 from hsi_compression.data.datamodule import build_dataset
+from hsi_compression.paths import default_stats_path, ensure_artifact_dirs
 from hsi_compression.stats import compute_global_minmax
-from hsi_compression.paths import ensure_artifact_dirs, default_stats_path
 from hsi_compression.utils import load_project_env
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Global min/max normalization"
-    )
+    parser = argparse.ArgumentParser(description="Global min/max normalization")
     parser.add_argument("dataset_root", type=str, help="Path to the dataset directory")
     parser.add_argument(
-        "--difficulty", type=str, default="easy", choices=["easy", "hard"],
-        help="Split type"
+        "--difficulty", type=str, default="easy", choices=["easy", "hard"], help="Split type"
     )
     parser.add_argument(
-        "--max-samples", type=int, default=None,
-        help="Limit to N samples to testing"
+        "--max-samples", type=int, default=None, help="Limit to N samples to testing"
     )
-    parser.add_argument(
-        "--num-workers", type=int, default=4,
-        help="Workers numbers"
-    )
+    parser.add_argument("--num-workers", type=int, default=4, help="Workers numbers")
     return parser.parse_args()
 
 
@@ -61,23 +55,23 @@ def main():
         num_workers=args.num_workers,
     )
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"global_min:        {stats['global_min']:.4f}")
     print(f"global_max:        {stats['global_max']:.4f}")
     print(f"num_valid_pixels:  {stats['num_valid_pixels']:,}")
-    print(f"{'='*50}\n")
+    print(f"{'=' * 50}\n")
 
     out_path = default_stats_path(args.difficulty)
     torch.save(
         {
-            "global_min":       stats["global_min"],
-            "global_max":       stats["global_max"],
+            "global_min": stats["global_min"],
+            "global_max": stats["global_max"],
             "num_valid_pixels": stats["num_valid_pixels"],
-            "split":            "train",
-            "difficulty":       args.difficulty,
-            "normalization":    "global_minmax",
-            "num_bands":        202,
-            "nodata_value":     -32768,
+            "split": "train",
+            "difficulty": args.difficulty,
+            "normalization": "global_minmax",
+            "num_bands": 202,
+            "nodata_value": -32768,
         },
         out_path,
     )

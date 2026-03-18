@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-
-ArrayLike = Union[np.ndarray, torch.Tensor]
+ArrayLike = np.ndarray | torch.Tensor
 
 
 def _to_numpy(x: ArrayLike) -> np.ndarray:
@@ -16,7 +15,7 @@ def _to_numpy(x: ArrayLike) -> np.ndarray:
     return np.asarray(x)
 
 
-def _ensure_chw(x: np.ndarray, channel_first: Optional[bool] = None) -> np.ndarray:
+def _ensure_chw(x: np.ndarray, channel_first: bool | None = None) -> np.ndarray:
     if x.ndim != 3:
         raise ValueError(f"Expected 3D array, got shape={x.shape}")
 
@@ -36,7 +35,7 @@ def _default_wavelengths(num_bands: int) -> np.ndarray:
     return np.arange(num_bands)
 
 
-def _validate_mask(mask: Optional[ArrayLike], hw: Tuple[int, int]) -> Optional[np.ndarray]:
+def _validate_mask(mask: ArrayLike | None, hw: tuple[int, int]) -> np.ndarray | None:
     if mask is None:
         return None
     mask_np = _to_numpy(mask).astype(bool)
@@ -49,7 +48,7 @@ def extract_spectrum(
     x: ArrayLike,
     row: int,
     col: int,
-    channel_first: Optional[bool] = None,
+    channel_first: bool | None = None,
 ) -> np.ndarray:
     x_np = _to_numpy(x)
     x_chw = _ensure_chw(x_np, channel_first=channel_first)
@@ -63,8 +62,8 @@ def extract_spectrum(
 
 def mean_spectrum(
     x: ArrayLike,
-    mask: Optional[ArrayLike] = None,
-    channel_first: Optional[bool] = None,
+    mask: ArrayLike | None = None,
+    channel_first: bool | None = None,
 ) -> np.ndarray:
     x_np = _to_numpy(x)
     x_chw = _ensure_chw(x_np, channel_first=channel_first)
@@ -86,8 +85,8 @@ def mean_spectrum(
 def sample_valid_pixels(
     mask: ArrayLike,
     n: int = 5,
-    seed: Optional[int] = 42,
-) -> List[Tuple[int, int]]:
+    seed: int | None = 42,
+) -> list[tuple[int, int]]:
     mask_np = _to_numpy(mask).astype(bool)
     ys, xs = np.where(mask_np)
 
@@ -103,17 +102,21 @@ def sample_valid_pixels(
 
 def plot_spectrum(
     spectrum: ArrayLike,
-    wavelengths: Optional[ArrayLike] = None,
+    wavelengths: ArrayLike | None = None,
     title: str = "Spectrum",
     xlabel: str = "Band",
     ylabel: str = "Reflectance / Intensity",
-    figsize: Tuple[int, int] = (8, 4),
-    ax: Optional[plt.Axes] = None,
+    figsize: tuple[int, int] = (8, 4),
+    ax: plt.Axes | None = None,
     show: bool = True,
-    label: Optional[str] = None,
+    label: str | None = None,
 ) -> plt.Axes:
     spec = _to_numpy(spectrum).reshape(-1)
-    x_axis = _default_wavelengths(len(spec)) if wavelengths is None else _to_numpy(wavelengths).reshape(-1)
+    x_axis = (
+        _default_wavelengths(len(spec))
+        if wavelengths is None
+        else _to_numpy(wavelengths).reshape(-1)
+    )
 
     if len(x_axis) != len(spec):
         raise ValueError("wavelengths and spectrum must have the same length")
@@ -139,14 +142,14 @@ def plot_spectrum(
 
 def plot_pixel_spectra(
     x: ArrayLike,
-    coords: Sequence[Tuple[int, int]],
-    wavelengths: Optional[ArrayLike] = None,
-    channel_first: Optional[bool] = None,
+    coords: Sequence[tuple[int, int]],
+    wavelengths: ArrayLike | None = None,
+    channel_first: bool | None = None,
     title: str = "Pixel spectra",
     xlabel: str = "Band",
     ylabel: str = "Reflectance / Intensity",
-    figsize: Tuple[int, int] = (9, 5),
-    ax: Optional[plt.Axes] = None,
+    figsize: tuple[int, int] = (9, 5),
+    ax: plt.Axes | None = None,
     show: bool = True,
 ) -> plt.Axes:
     x_np = _to_numpy(x)
@@ -180,15 +183,15 @@ def plot_pixel_spectra(
 def plot_random_spectra(
     x: ArrayLike,
     n: int = 5,
-    mask: Optional[ArrayLike] = None,
-    wavelengths: Optional[ArrayLike] = None,
-    channel_first: Optional[bool] = None,
-    seed: Optional[int] = 42,
+    mask: ArrayLike | None = None,
+    wavelengths: ArrayLike | None = None,
+    channel_first: bool | None = None,
+    seed: int | None = 42,
     title: str = "Random pixel spectra",
-    figsize: Tuple[int, int] = (9, 5),
-    ax: Optional[plt.Axes] = None,
+    figsize: tuple[int, int] = (9, 5),
+    ax: plt.Axes | None = None,
     show: bool = True,
-) -> Tuple[plt.Axes, List[Tuple[int, int]]]:
+) -> tuple[plt.Axes, list[tuple[int, int]]]:
     x_np = _to_numpy(x)
     x_chw = _ensure_chw(x_np, channel_first=channel_first)
     _, h, w = x_chw.shape
@@ -214,12 +217,12 @@ def plot_random_spectra(
 
 def plot_mean_spectrum(
     x: ArrayLike,
-    mask: Optional[ArrayLike] = None,
-    wavelengths: Optional[ArrayLike] = None,
-    channel_first: Optional[bool] = None,
+    mask: ArrayLike | None = None,
+    wavelengths: ArrayLike | None = None,
+    channel_first: bool | None = None,
     title: str = "Mean spectrum",
-    figsize: Tuple[int, int] = (8, 4),
-    ax: Optional[plt.Axes] = None,
+    figsize: tuple[int, int] = (8, 4),
+    ax: plt.Axes | None = None,
     show: bool = True,
     label: str = "mean",
 ) -> plt.Axes:
@@ -243,19 +246,23 @@ def plot_spectrum_comparison(
     x_pred: ArrayLike,
     row: int,
     col: int,
-    wavelengths: Optional[ArrayLike] = None,
-    channel_first: Optional[bool] = None,
-    title: Optional[str] = None,
+    wavelengths: ArrayLike | None = None,
+    channel_first: bool | None = None,
+    title: str | None = None,
     xlabel: str = "Band",
     ylabel: str = "Reflectance / Intensity",
-    figsize: Tuple[int, int] = (9, 5),
-    ax: Optional[plt.Axes] = None,
+    figsize: tuple[int, int] = (9, 5),
+    ax: plt.Axes | None = None,
     show: bool = True,
 ) -> plt.Axes:
     true_spec = extract_spectrum(x_true, row=row, col=col, channel_first=channel_first)
     pred_spec = extract_spectrum(x_pred, row=row, col=col, channel_first=channel_first)
 
-    x_axis = _default_wavelengths(len(true_spec)) if wavelengths is None else _to_numpy(wavelengths).reshape(-1)
+    x_axis = (
+        _default_wavelengths(len(true_spec))
+        if wavelengths is None
+        else _to_numpy(wavelengths).reshape(-1)
+    )
     if len(x_axis) != len(true_spec):
         raise ValueError("wavelengths length must match number of spectral bands")
 
@@ -280,20 +287,24 @@ def plot_spectrum_comparison(
 def plot_mean_spectrum_comparison(
     x_true: ArrayLike,
     x_pred: ArrayLike,
-    mask: Optional[ArrayLike] = None,
-    wavelengths: Optional[ArrayLike] = None,
-    channel_first: Optional[bool] = None,
+    mask: ArrayLike | None = None,
+    wavelengths: ArrayLike | None = None,
+    channel_first: bool | None = None,
     title: str = "Mean spectrum comparison",
     xlabel: str = "Band",
     ylabel: str = "Reflectance / Intensity",
-    figsize: Tuple[int, int] = (9, 5),
-    ax: Optional[plt.Axes] = None,
+    figsize: tuple[int, int] = (9, 5),
+    ax: plt.Axes | None = None,
     show: bool = True,
 ) -> plt.Axes:
     true_mean = mean_spectrum(x_true, mask=mask, channel_first=channel_first)
     pred_mean = mean_spectrum(x_pred, mask=mask, channel_first=channel_first)
 
-    x_axis = _default_wavelengths(len(true_mean)) if wavelengths is None else _to_numpy(wavelengths).reshape(-1)
+    x_axis = (
+        _default_wavelengths(len(true_mean))
+        if wavelengths is None
+        else _to_numpy(wavelengths).reshape(-1)
+    )
     if len(x_axis) != len(true_mean):
         raise ValueError("wavelengths length must match number of spectral bands")
 

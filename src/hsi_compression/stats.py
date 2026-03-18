@@ -23,8 +23,8 @@ def compute_global_minmax(
         if max_samples is not None and i >= max_samples:
             break
 
-        x = batch["x"].squeeze(0).float()       # (C, H, W)
-        m = batch["valid_mask"].squeeze(0)       # (C, H, W) bool
+        x = batch["x"].squeeze(0).float()  # (C, H, W)
+        m = batch["valid_mask"].squeeze(0)  # (C, H, W) bool
 
         valid_vals = x[m]
         if valid_vals.numel() == 0:

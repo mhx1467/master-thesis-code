@@ -9,9 +9,7 @@ class GlobalMinMaxNormalize:
         eps: float = 1e-8,
     ):
         if global_max <= global_min:
-            raise ValueError(
-                f"global_max ({global_max}) must be > global_min ({global_min})"
-            )
+            raise ValueError(f"global_max ({global_max}) must be > global_min ({global_min})")
         self.global_min = global_min
         self.global_max = global_max
         self.eps = eps
@@ -35,7 +33,4 @@ class GlobalMinMaxNormalize:
         return x_norm * self._range + self.global_min
 
     def __repr__(self) -> str:
-        return (
-            f"GlobalMinMaxNormalize("
-            f"min={self.global_min:.2f}, max={self.global_max:.2f})"
-        )
+        return f"GlobalMinMaxNormalize(min={self.global_min:.2f}, max={self.global_max:.2f})"

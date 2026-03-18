@@ -1,9 +1,10 @@
-from pathlib import Path
 import random
 import sys
+from pathlib import Path
+
 from torch.utils.data import Subset
 
-from hsi_compression.data import build_dataset, build_dataloader
+from hsi_compression.data import build_dataloader, build_dataset
 from hsi_compression.utils import load_project_env
 
 
@@ -45,12 +46,12 @@ def main():
 
         vals = x[m]
         all_sum += vals.sum().item()
-        all_sumsq += (vals ** 2).sum().item()
+        all_sumsq += (vals**2).sum().item()
         all_count += vals.numel()
 
     mean = all_sum / all_count
-    var = all_sumsq / all_count - mean ** 2
-    std = var ** 0.5
+    var = all_sumsq / all_count - mean**2
+    std = var**0.5
 
     print("normalized valid mean:", mean)
     print("normalized valid std:", std)
