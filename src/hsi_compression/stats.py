@@ -3,14 +3,11 @@ from torch.utils.data import DataLoader
 
 
 @torch.no_grad()
-def compute_band_stats(dataset, max_samples=None, num_workers: int = 0):
-    """
-    Compute per-band mean/std using only valid pixels.
-
-    Expects dataset items to be dicts with:
-      - "x": (B, H, W)
-      - "valid_mask": (B, H, W)
-    """
+def compute_global_minmax(
+    dataset,
+    max_samples: int | None = None,
+    num_workers: int = 0,
+) -> dict:
     loader = DataLoader(
         dataset,
         batch_size=1,
@@ -18,36 +15,33 @@ def compute_band_stats(dataset, max_samples=None, num_workers: int = 0):
         num_workers=num_workers,
     )
 
-    sum_ = None
-    sumsq_ = None
-    count_ = None
+    global_min = float("inf")
+    global_max = float("-inf")
+    num_valid = 0
 
     for i, batch in enumerate(loader):
         if max_samples is not None and i >= max_samples:
             break
 
-        x = batch["x"].squeeze(0)          # (B, H, W)
-        m = batch["valid_mask"].squeeze(0) # (B, H, W)
+        x = batch["x"].squeeze(0).float()       # (C, H, W)
+        m = batch["valid_mask"].squeeze(0)       # (C, H, W) bool
 
-        B = x.shape[0]
+        valid_vals = x[m]
+        if valid_vals.numel() == 0:
+            continue
 
-        if sum_ is None:
-            sum_ = torch.zeros(B, dtype=torch.float64)
-            sumsq_ = torch.zeros(B, dtype=torch.float64)
-            count_ = torch.zeros(B, dtype=torch.float64)
+        batch_min = valid_vals.min().item()
+        batch_max = valid_vals.max().item()
 
-        for b in range(B):
-            xb = x[b][m[b]]
-            if xb.numel() == 0:
-                continue
+        global_min = min(global_min, batch_min)
+        global_max = max(global_max, batch_max)
+        num_valid += valid_vals.numel()
 
-            sum_[b] += xb.double().sum()
-            sumsq_[b] += (xb.double() ** 2).sum()
-            count_[b] += xb.numel()
+    if global_min == float("inf"):
+        raise RuntimeError("There are no valid pixels in the dataset to compute statistics.")
 
-    mean = sum_ / torch.clamp(count_, min=1.0)
-    var = sumsq_ / torch.clamp(count_, min=1.0) - mean ** 2
-    var = torch.clamp(var, min=1e-12)
-    std = torch.sqrt(var)
-
-    return mean.float(), std.float(), count_
+    return {
+        "global_min": global_min,
+        "global_max": global_max,
+        "num_valid_pixels": num_valid,
+    }

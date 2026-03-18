@@ -6,119 +6,84 @@ import argparse
 
 import torch
 from torch.utils.data import Subset
+from tqdm.auto import tqdm
 
 from hsi_compression.data import build_dataset, build_dataloader
 from hsi_compression.engine.checkpointing import load_checkpoint
-from hsi_compression.metrics import masked_mse, masked_rmse, masked_psnr, masked_sam_deg
+from hsi_compression.metrics import masked_mse, masked_rmse, masked_psnr, masked_sam_deg, estimate_bpppc
 from hsi_compression.models.registry import build_model
 from hsi_compression.paths import ensure_artifact_dirs, logs_dir
 from hsi_compression.utils import load_project_env
 from hsi_compression.utils.wandb_utils import init_wandb
-from tqdm.auto import tqdm
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate HSI compression model checkpoint")
-
-    parser.add_argument(
-        "checkpoint_path",
-        type=str,
-        help="Path to checkpoint (.pt file)",
-    )
-
-    parser.add_argument(
-        "dataset_root",
-        nargs="?",
-        default=None,
-        help="Path to dataset root. If omitted, DATASET_ROOT env var will be used.",
-    )
-
-    parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
+    parser = argparse.ArgumentParser(description="Evaluate a model checkpoint on a specified dataset split")
+    parser.add_argument("checkpoint_path", type=str)
+    parser.add_argument("dataset_root", nargs="?", default=None)
+    parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--difficulty", type=str, default=None)
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--subset-size", type=int, default=None)
-    parser.add_argument("--drop-invalid-channels", action="store_true")
-
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=None,
-        help="Optional model override. Usually taken from checkpoint config.",
-    )
-    parser.add_argument(
-        "--loss",
-        type=str,
-        default=None,
-        help="Optional loss override. Usually taken from checkpoint config.",
-    )
-
+    parser.add_argument("--quantization-bits", type=int, default=8,
+                        help="Bit depth of the latent representation for bpppc calculation")
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--disable-wandb", action="store_true")
     parser.add_argument("--save-json", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
-
     return parser.parse_args()
 
 
 @torch.no_grad()
-def evaluate_model(
-    model,
-    loader,
-    device: torch.device,
-    show_progress: bool = True,
-    split_name: str = "eval",
-):
+def evaluate_model(model, loader, device, num_input_bands, quantization_bits, show_progress=True, split_name="eval"):
     model.eval()
 
-    total_loss = 0.0
-    total_rmse = 0.0
-    total_psnr = 0.0
-    total_sam_deg = 0.0
+    total_loss = total_rmse = total_psnr = total_sam = total_bpppc = 0.0
     num_batches = 0
     latent_shape = None
 
-    progress = loader
-    if show_progress:
-        progress = tqdm(loader, desc=f"Evaluate [{split_name}]", leave=False)
+    progress = tqdm(loader, desc=f"Evaluate [{split_name}]") if show_progress else loader
 
     for batch in progress:
-        x = batch["x"].to(device)
+        x    = batch["x"].to(device)
         mask = batch["valid_mask"].to(device)
 
         outputs = model(x)
-        x_hat = outputs["x_hat"]
-        z = outputs.get("z")
+        x_hat  = outputs["x_hat"]
+        z      = outputs.get("z")
 
-        loss = masked_mse(x_hat, x, mask)
-        rmse = masked_rmse(x_hat, x, mask)
-        psnr = masked_psnr(x_hat, x, mask, data_range=1.0)
-        sam_deg = masked_sam_deg(x_hat, x, mask)
+        loss  = masked_mse(x_hat, x, mask)
+        rmse  = masked_rmse(x_hat, x, mask)
+        psnr  = masked_psnr(x_hat, x, mask, data_range=1.0)
+        sam   = masked_sam_deg(x_hat, x, mask)
 
-        total_loss += loss.item()
-        total_rmse += rmse.item()
-        total_psnr += psnr.item()
-        total_sam_deg += sam_deg.item()
+        total_loss  += loss.item()
+        total_rmse  += rmse.item()
+        total_psnr  += psnr.item()
+        total_sam   += sam.item()
         num_batches += 1
 
-        if latent_shape is None and z is not None:
-            latent_shape = tuple(z.shape[1:])
+        if z is not None:
+            if latent_shape is None:
+                latent_shape = tuple(z.shape[1:])
+            total_bpppc += estimate_bpppc(z, num_bands=num_input_bands, quantization_bits=quantization_bits)
 
         if show_progress:
             progress.set_postfix({
-                "loss": f"{loss.item():.4f}",
-                "rmse": f"{rmse.item():.4f}",
-                "psnr": f"{psnr.item():.2f}",
-                "sam": f"{sam_deg.item():.2f}",
+                "psnr": f"{psnr.item():.2f}dB",
+                "sam":  f"{sam.item():.2f}°",
             })
 
+    n = max(num_batches, 1)
     return {
-        "loss": total_loss / max(num_batches, 1),
-        "rmse": total_rmse / max(num_batches, 1),
-        "psnr": total_psnr / max(num_batches, 1),
-        "sam_deg": total_sam_deg / max(num_batches, 1),
+        "loss":         total_loss  / n,
+        "rmse":         total_rmse  / n,
+        "psnr":         total_psnr  / n,
+        "sam_deg":      total_sam   / n,
+        "bpppc":        total_bpppc / n,
         "latent_shape": latent_shape,
-        "num_batches": num_batches,
+        "num_batches":  num_batches,
     }
 
 
@@ -132,209 +97,111 @@ def main():
         print(f"Error: checkpoint does not exist: {checkpoint_path}")
         sys.exit(1)
 
-    dataset_root_str = (
-        args.dataset_root
-        or os.environ.get("DATASET_ROOT")
-        or "/home/brwsx/hsi-compression/pipelines/pull-dataset/hyspectnet-11k/hyspecnet-11k-full"
+    dataset_root = Path(
+        args.dataset_root or os.environ.get("DATASET_ROOT") or "/data/hyspecnet-11k"
     )
-
-    dataset_root = Path(dataset_root_str)
-    if not dataset_root.exists():
-        print(f"Error: dataset root does not exist: {dataset_root}")
-        sys.exit(1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"Device: {device}")
 
-    # 1. Read checkpoint metadata first
-    checkpoint_raw = torch.load(checkpoint_path, map_location="cpu")
-    ckpt_config = checkpoint_raw.get("config", {})
-
-    # Support both old flat config and new nested YAML-style config
-    model_section = ckpt_config.get("model", {})
+    ckpt_raw    = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    ckpt_config = ckpt_raw.get("config", {})
+    model_section    = ckpt_config.get("model", {})
+    data_section     = ckpt_config.get("data", {})
     training_section = ckpt_config.get("training", {})
-    data_section = ckpt_config.get("data", {})
 
-    model_name = args.model or model_section.get("model_name") or ckpt_config.get("model_name")
-    if model_name is None:
-        print("Error: model name not found in checkpoint and not provided via --model")
-        sys.exit(1)
-
-    loss_name = (
-        args.loss
-        or training_section.get("loss_name")
-        or ckpt_config.get("loss_name", "masked_mse")
-    )
-
-    difficulty = (
-        args.difficulty
-        or data_section.get("difficulty")
-        or ckpt_config.get("difficulty", "easy")
-    )
-
-    drop_invalid_channels = (
-        args.drop_invalid_channels
-        or data_section.get("drop_invalid_channels", False)
-        or ckpt_config.get("drop_invalid_channels", False)
-    )
-
+    model_name   = model_section.get("model_name")
     model_kwargs = model_section.get("model_kwargs", {})
-    if not model_kwargs:
-        model_kwargs = ckpt_config.get("model_kwargs", {})
+    difficulty   = args.difficulty or data_section.get("difficulty", "easy")
+    quant_bits   = args.quantization_bits
 
-    if not model_kwargs:
-        model_kwargs = {
-            "latent_channels": ckpt_config.get("latent_channels", 16),
-            "hidden_channels": tuple(ckpt_config.get("hidden_channels", (128, 64))),
-        }
-
-    # 2. Build dataset
-    full_ds = build_dataset(
+    ds = build_dataset(
         dataset_root=dataset_root,
         split_name=args.split,
         difficulty=difficulty,
         normalized=True,
         return_mask=True,
-        drop_invalid_channels=drop_invalid_channels,
+        drop_invalid_channels=True,
     )
+    if args.subset_size:
+        ds = Subset(ds, list(range(min(args.subset_size, len(ds)))))
 
-    if args.subset_size is not None:
-        subset_size = min(args.subset_size, len(full_ds))
-        ds = Subset(full_ds, list(range(subset_size)))
-    else:
-        ds = full_ds
+    loader = build_dataloader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    loader = build_dataloader(
-        ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-    )
+    sample_x = (ds[0] if not args.subset_size else ds.dataset[0])["x"]
+    num_input_bands = sample_x.shape[0]
+    print(f"Input bands: {num_input_bands}")
 
-    sample = full_ds[0]
-    in_channels = sample["x"].shape[0]
+    model_kwargs["in_channels"] = num_input_bands
 
-    # 3. Build model and load weights
     model = build_model(
         model_name=model_name,
-        in_channels=in_channels,
-        **model_kwargs,
+        in_channels=num_input_bands,
+        **{k: v for k, v in model_kwargs.items() if k != "in_channels"},
     ).to(device)
 
-    load_checkpoint(
-        path=checkpoint_path,
-        model=model,
-        optimizer=None,
-        map_location=device,
-    )
+    load_checkpoint(path=checkpoint_path, model=model, optimizer=None, map_location=device)
 
-    # 4. Evaluate
     metrics = evaluate_model(
-        model=model,
-        loader=loader,
-        device=device,
-        show_progress=True,
+        model=model, loader=loader, device=device,
+        num_input_bands=num_input_bands,
+        quantization_bits=quant_bits,
+        show_progress=not args.no_progress,
         split_name=args.split,
     )
 
-    # 5. Compression ratio proxy
-    ratio = None
-    if hasattr(model, "compression_ratio_proxy") and metrics["latent_shape"] is not None:
-        ratio = model.compression_ratio_proxy(
-            input_shape=(in_channels, 128, 128),
+    cr_proxy = None
+    if hasattr(model, "compression_ratio_proxy") and metrics["latent_shape"]:
+        cr_proxy = model.compression_ratio_proxy(
+            input_shape=(num_input_bands, 128, 128),
             latent_shape=metrics["latent_shape"],
         )
 
+    print(f"\n{'='*55}")
+    print(f"  Model:      {model_name}")
+    print(f"  Split:      {args.split} [{difficulty}]")
+    print(f"  Samples:     {len(ds)}")
+    print(f"{'-'*55}")
+    print(f"  PSNR:       {metrics['psnr']:.4f} dB")
+    print(f"  SAM:        {metrics['sam_deg']:.4f} °")
+    print(f"  RMSE:       {metrics['rmse']:.6f}")
+    print(f"  MSE:        {metrics['loss']:.6f}")
+    print(f"  bpppc:      {metrics['bpppc']:.6f}")
+    print(f"  Latent:     {metrics['latent_shape']}")
+    print(f"  CR proxy:   {cr_proxy}")
+    print(f"{'='*55}\n")
+
     result = {
         "checkpoint_path": str(checkpoint_path),
-        "dataset_root": str(dataset_root),
         "split": args.split,
         "difficulty": difficulty,
         "model_name": model_name,
-        "loss_name": loss_name,
         "num_samples": len(ds),
-        "batch_size": args.batch_size,
-        "device": str(device),
-        "loss": metrics["loss"],
-        "rmse": metrics["rmse"],
-        "psnr": metrics["psnr"],
-        "sam_deg": metrics["sam_deg"],
-        "latent_shape": metrics["latent_shape"],
-        "compression_ratio_proxy": ratio,
+        "num_input_bands": num_input_bands,
+        "quantization_bits": quant_bits,
+        **metrics,
+        "compression_ratio_proxy": cr_proxy,
     }
 
-    print("\nEvaluation results")
-    print("------------------")
-    print(f"model_name:               {result['model_name']}")
-    print(f"split:                    {result['split']}")
-    print(f"difficulty:               {result['difficulty']}")
-    print(f"num_samples:              {result['num_samples']}")
-    print(f"loss:                     {result['loss']:.6f}")
-    print(f"rmse:                     {result['rmse']:.6f}")
-    print(f"psnr:                     {result['psnr']:.6f}")
-    print(f"sam_deg:                  {result['sam_deg']:.6f}")
-    print(f"latent_shape:             {result['latent_shape']}")
-    print(f"compression_ratio_proxy:  {result['compression_ratio_proxy']}")
-
-    # 6. Save JSON
     if args.save_json:
-        out_name = f"eval_{model_name}_{difficulty}_{args.split}.json"
-        out_path = logs_dir() / out_name
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out = logs_dir() / f"eval_{model_name}_{difficulty}_{args.split}.json"
+        with open(out, "w") as f:
+            json.dump({k: str(v) if not isinstance(v, (int, float, str, type(None))) else v
+                       for k, v in result.items()}, f, indent=2)
+        print(f"Saved: {out}")
 
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
-
-        print(f"Saved JSON results to: {out_path}")
-
-    # 7. Optional W&B logging
     if not args.disable_wandb:
-        run_name = args.run_name or f"eval_{model_name}_{difficulty}_{args.split}"
-
-        wb_config = {
-            "checkpoint_path": str(checkpoint_path),
-            "dataset_root": str(dataset_root),
-            "split": args.split,
-            "difficulty": difficulty,
-            "model_name": model_name,
-            "loss_name": loss_name,
-            "batch_size": args.batch_size,
-            "subset_size": args.subset_size,
-            "drop_invalid_channels": drop_invalid_channels,
-            "model_kwargs": model_kwargs,
-        }
-
         with init_wandb(
-            project="hsi-compression",
-            run_name=run_name,
-            config=wb_config,
+            project="hsi-compression-paper",
+            run_name=args.run_name or f"eval_{model_name}_{args.split}",
+            config=result,
         ) as run:
             run.log({
-                "eval/loss": result["loss"],
-                "eval/rmse": result["rmse"],
-                "eval/psnr": result["psnr"],
-                "eval/sam_deg": result["sam_deg"],
-            }, step=0)
-
-            if result["latent_shape"] is not None:
-                run.log({
-                    "model/latent_c": result["latent_shape"][0],
-                    "model/latent_h": result["latent_shape"][1],
-                    "model/latent_w": result["latent_shape"][2],
-                }, step=0)
-
-            if ratio is not None:
-                run.log({
-                    "model/compression_ratio_proxy": ratio,
-                }, step=0)
-
-            run.summary["eval_loss"] = result["loss"]
-            run.summary["eval_rmse"] = result["rmse"]
-            run.summary["eval_psnr"] = result["psnr"]
-            run.summary["eval_sam_deg"] = result["sam_deg"]
-            run.summary["split"] = result["split"]
-            run.summary["difficulty"] = result["difficulty"]
-            run.summary["checkpoint_path"] = result["checkpoint_path"]
+                "eval/psnr":   metrics["psnr"],
+                "eval/sam_deg": metrics["sam_deg"],
+                "eval/rmse":   metrics["rmse"],
+                "eval/bpppc":  metrics["bpppc"],
+            })
 
 
 if __name__ == "__main__":

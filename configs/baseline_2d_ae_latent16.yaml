@@ -1,5 +1,5 @@
 experiment:
-  name: paper_baseline_2d_ae_latent32
+  name: paper_baseline_2d_ae_latent16
   seed: 42
 
 data:
@@ -30,7 +30,7 @@ model:
   model_name: baseline_2d_ae
   model_kwargs:
     in_channels: 202
-    latent_channels: 32
+    latent_channels: 16
     hidden_channels: [128, 64]
 
 logging:

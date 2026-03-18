@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from hsi_compression.engine.train import train_one_epoch
 from hsi_compression.engine.validate import validate_one_epoch
 from hsi_compression.engine.checkpointing import save_checkpoint
@@ -18,20 +16,21 @@ def fit(
     config: dict,
     logger=None,
     scheduler=None,
-    show_progress=True,
+    show_progress: bool = True,
     train_sampler=None,
+    grad_clip_max_norm: float = 1.0,
+    num_input_bands: int = 202,
+    quantization_bits: int = 8, 
 ):
-    best_val_loss = float("inf")
+    best_val_psnr = float("-inf")
     history = []
 
     training_cfg = config.get("training", {})
     early_cfg = training_cfg.get("early_stopping", {})
-
-    early_enabled = early_cfg.get("enabled", False)
-    early_patience = early_cfg.get("patience", 5)
+    early_enabled  = early_cfg.get("enabled", False)
+    early_patience = early_cfg.get("patience", 20)
     early_min_delta = early_cfg.get("min_delta", 0.0)
-
-    epochs_without_improvement = 0    
+    epochs_without_improvement = 0
 
     for epoch in range(1, epochs + 1):
         if train_sampler is not None:
@@ -49,6 +48,7 @@ def fit(
             epoch=epoch,
             total_epochs=epochs,
             show_progress=show_progress,
+            grad_clip_max_norm=grad_clip_max_norm,
         )
 
         val_metrics = validate_one_epoch(
@@ -56,6 +56,8 @@ def fit(
             loader=val_loader,
             loss_fn=loss_fn,
             device=device,
+            num_input_bands=num_input_bands,
+            quantization_bits=quantization_bits,
             epoch=epoch,
             total_epochs=epochs,
             show_progress=show_progress,
@@ -64,31 +66,36 @@ def fit(
         if scheduler is not None:
             scheduler.step()
 
-        record = {
-            "epoch": epoch,
-            "train/loss": train_metrics["loss"],
-            "train/rmse": train_metrics["rmse"],
-            "val/loss": val_metrics["loss"],
-            "val/rmse": val_metrics["rmse"],
-            "val/sam_deg": val_metrics["sam_deg"],
-        }
-
         latent_shape = val_metrics.get("latent_shape")
-        if latent_shape is not None:
-            record["model/latent_c"] = latent_shape[0]
-            record["model/latent_h"] = latent_shape[1]
-            record["model/latent_w"] = latent_shape[2]
-
         model_for_ratio = model.module if hasattr(model, "module") else model
 
-        if hasattr(model_for_ratio, "compression_ratio_proxy") and latent_shape is not None:
-            input_shape = config.get("input_shape")
-            if input_shape is not None:
-                ratio = model_for_ratio.compression_ratio_proxy(
-                    input_shape=input_shape,
-                    latent_shape=latent_shape,
-                )
-                record["model/compression_ratio_proxy"] = ratio
+        cr_proxy = None
+        if hasattr(model_for_ratio, "compression_ratio_proxy") and latent_shape:
+            input_shape = (num_input_bands, 128, 128)
+            cr_proxy = model_for_ratio.compression_ratio_proxy(
+                input_shape=input_shape,
+                latent_shape=latent_shape,
+            )
+
+        record = {
+            "epoch":              epoch,
+            "train/loss":         train_metrics["loss"],
+            "train/rmse":         train_metrics["rmse"],
+            "train/psnr":         train_metrics["psnr"],
+            "val/loss":           val_metrics["loss"],
+            "val/rmse":           val_metrics["rmse"],
+            "val/psnr":           val_metrics["psnr"],
+            "val/sam_deg":        val_metrics["sam_deg"],
+            "val/bpppc":          val_metrics["bpppc"],
+        }
+        if latent_shape:
+            record.update({
+                "model/latent_c": latent_shape[0],
+                "model/latent_h": latent_shape[1],
+                "model/latent_w": latent_shape[2],
+            })
+        if cr_proxy is not None:
+            record["model/cr_proxy"] = cr_proxy
 
         history.append(record)
 
@@ -97,56 +104,55 @@ def fit(
 
         if is_main_process():
             print(
-                f"Epoch {epoch:03d} | "
-                f"train_loss={record['train/loss']:.6f} | "
-                f"train_rmse={record['train/rmse']:.6f} | "
-                f"val_loss={record['val/loss']:.6f} | "
-                f"val_rmse={record['val/rmse']:.6f} | "
-                f"val_sam_deg={record['val/sam_deg']:.6f}"
+                f"  train_loss={record['train/loss']:.5f} | "
+                f"train_psnr={record['train/psnr']:.2f}dB | "
+                f"val_loss={record['val/loss']:.5f} | "
+                f"val_psnr={record['val/psnr']:.2f}dB | "
+                f"val_sam={record['val/sam_deg']:.2f}° | "
+                f"bpppc={record['val/bpppc']:.4f}"
             )
 
-        if record["val/loss"] < best_val_loss - early_min_delta:
-            best_val_loss = record["val/loss"]
+        val_psnr = record["val/psnr"]
+        if val_psnr > best_val_psnr + early_min_delta:
+            best_val_psnr = val_psnr
             epochs_without_improvement = 0
 
-            extra = {
-                "latent_shape": latent_shape,
-            }
-            if "model/compression_ratio_proxy" in record:
-                extra["compression_ratio_proxy"] = record["model/compression_ratio_proxy"]
-
             if is_main_process():
-                model_to_save = model.module if hasattr(model, "module") else model
+                extra = {
+                    "latent_shape": latent_shape,
+                    "best_val_psnr": best_val_psnr,
+                    "best_val_bpppc": record["val/bpppc"],
+                }
+                if cr_proxy is not None:
+                    extra["cr_proxy"] = cr_proxy
 
+                model_to_save = model.module if hasattr(model, "module") else model
                 save_checkpoint(
                     path=checkpoint_path,
                     epoch=epoch,
                     model=model_to_save,
                     optimizer=optimizer,
                     config=config,
-                    best_val_loss=best_val_loss,
+                    best_val_loss=val_metrics["loss"],
                     extra=extra,
                 )
 
                 if logger is not None:
-                    logger.summary["best_val_loss"] = best_val_loss
-                    logger.summary["best_epoch"] = epoch
-                    logger.summary["best_checkpoint_path"] = str(checkpoint_path)
-
-                    if "model/compression_ratio_proxy" in record:
-                        logger.summary["compression_ratio_proxy"] = record["model/compression_ratio_proxy"]
+                    logger.summary["best_val_psnr"]  = best_val_psnr
+                    logger.summary["best_val_bpppc"] = record["val/bpppc"]
+                    logger.summary["best_epoch"]     = epoch
         else:
             epochs_without_improvement += 1
 
         if early_enabled and epochs_without_improvement >= early_patience:
             if is_main_process():
                 print(
-                    f"Early stopping triggered after {epoch} epochs "
-                    f"(patience={early_patience})."
+                    f"\nEarly stopping after {epoch} epochs "
+                    f"(patience={early_patience}, no improvement in PSNR)."
                 )
-            break        
+            break
 
     return {
-        "best_val_loss": best_val_loss,
+        "best_val_psnr": best_val_psnr,
         "history": history,
     }
