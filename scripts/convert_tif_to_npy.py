@@ -26,7 +26,7 @@ def convert_one(tif_path: Path) -> tuple[Path, bool, str]:
         x[x == NODATA_VALUE] = 0.0
 
         keep = [i for i in range(x.shape[0]) if i not in WATER_VAPOR_BANDS]
-        x = x[keep]   # (202, H, W)
+        x = x[keep]  # (202, H, W)
 
         x = np.clip(x, CLIP_MIN, CLIP_MAX)
         x = (x - CLIP_MIN) / (CLIP_MAX - CLIP_MIN)
@@ -40,7 +40,9 @@ def convert_one(tif_path: Path) -> tuple[Path, bool, str]:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Convert TIF spectral images to normalized NumPy arrays")
+    p = argparse.ArgumentParser(
+        description="Convert TIF spectral images to normalized NumPy arrays"
+    )
     p.add_argument("dataset_root", type=str)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--dry-run", action="store_true", help="Only count files, don't convert")
@@ -64,9 +66,11 @@ def main():
         sys.exit(1)
 
     already_done = sum(
-        1 for f in tif_files
-        if (f.parent / f.stem.replace("-SPECTRAL_IMAGE", "-DATA.npy")
-            .replace(".npy", "")).with_suffix(".npy").exists()
+        1
+        for f in tif_files
+        if (f.parent / f.stem.replace("-SPECTRAL_IMAGE", "-DATA.npy").replace(".npy", ""))
+        .with_suffix(".npy")
+        .exists()
     )
 
     sample_size_mb = 128 * 128 * 202 * 4 / 1024 / 1024
@@ -82,7 +86,8 @@ def main():
         return
 
     to_convert = [
-        f for f in tif_files
+        f
+        for f in tif_files
         if not (f.parent / f"{f.stem.replace('-SPECTRAL_IMAGE', '')}-DATA.npy").exists()
     ]
 

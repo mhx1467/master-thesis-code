@@ -29,37 +29,29 @@ def build_dataset(
     csv_path = split_csv_path(dataset_root, split_name, difficulty)
     paths = resolve_split_paths(dataset_root, csv_path)
 
-    if prefer_npy:
-        sample_tif = paths[0]
-        stem = sample_tif.stem.replace("-SPECTRAL_IMAGE", "")
-        sample_npy = sample_tif.parent / f"{stem}-DATA.npy"
-        npy_available = sample_npy.exists()
-    else:
-        npy_available = False
+    npy_available = False
+    if prefer_npy and paths:
+        stem = paths[0].stem.replace("-SPECTRAL_IMAGE", "")
+        npy_available = (paths[0].parent / f"{stem}-DATA.npy").exists()
 
     transform = None
     if normalized and not npy_available:
-        stats_path = (
-            Path(stats_path)
-            if stats_path is not None
-            else default_stats_path(difficulty)
-        )
+        stats_path = Path(stats_path) if stats_path is not None else default_stats_path(difficulty)
         if not stats_path.exists():
             raise FileNotFoundError(
-                f"No stats file found: {stats_path}\n"
+                f"No stats found: {stats_path}\n"
+                f"Run: python scripts/build_stats.py {dataset_root} --difficulty {difficulty}"
             )
         stats = torch.load(stats_path, map_location="cpu", weights_only=True)
         if "global_min" not in stats or "global_max" not in stats:
             raise KeyError(
-                f"File {stats_path} does not contain 'global_min' or 'global_max'.\n"
-                f"Generate a new one: python scripts/build_stats.py <dataset_root>"
+                f"Stats file {stats_path} does not contain 'global_min'/'global_max'.\n"
+                f"Generate new stats: python scripts/build_stats.py <dataset_root>"
             )
         transform = GlobalMinMaxNormalize(
             global_min=float(stats["global_min"]),
             global_max=float(stats["global_max"]),
         )
-    elif normalized and npy_available:
-        transform = None
 
     return HSITiffDataset(
         paths=paths,
