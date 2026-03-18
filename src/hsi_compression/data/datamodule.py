@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import torch
@@ -73,15 +74,21 @@ def build_dataloader(
     pin_memory: bool = True,
     persistent_workers: bool = True,
 ) -> DataLoader:
+    # https://github.com/pytorch/pytorch/issues/111017
+    if sys.version_info >= (3, 13) and persistent_workers:
+        persistent_workers = False
+
     use_persistent = persistent_workers and num_workers > 0
+    use_prefetch = num_workers > 0
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=(shuffle if sampler is None else False),
         sampler=sampler,
         num_workers=num_workers,
-        pin_memory=pin_memory,
+        pin_memory=pin_memory and torch.cuda.is_available(),
         persistent_workers=use_persistent,
-        prefetch_factor=2 if num_workers > 0 else None,
+        prefetch_factor=2 if use_prefetch else None,
         drop_last=False,
     )

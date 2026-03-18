@@ -82,13 +82,13 @@ class HSITiffDataset(Dataset):
 
     def _load_npy(self, tif_path: Path):
         npy_path = self._tif_to_npy_path(tif_path)
-        data = np.load(str(npy_path))  # (128, 128, 202)
+        if self.npy_mmap:
+            data = np.load(str(npy_path), mmap_mode='r')
+        else:
+            data = np.load(str(npy_path))
 
-        # (H, W, C) to (C, H, W)
         data = data.transpose(2, 0, 1).astype(np.float32)  # (202, 128, 128)
-
         valid_mask = np.ones_like(data, dtype=bool)
-
         return data, valid_mask
 
     def _load_tif(self, path: Path):

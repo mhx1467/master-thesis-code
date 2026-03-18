@@ -1,6 +1,6 @@
 import argparse
-import time
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +30,6 @@ def main():
 
     print("[ 1 ] ENVIRONMENT")
     hr()
-    import platform
     print(f"  Python:   {sys.version.split()[0]}")
     print(f"  PyTorch:  {torch.__version__}")
     print(f"  CUDA:     {torch.cuda.is_available()} "
@@ -104,12 +103,12 @@ def main():
         read_speed = file_size * 10 / (t1 - t0)
         print(f"  Prędkość odczytu: {read_speed:.0f} MB/s")
         if read_speed < 200:
-            print(f"  ⚠️  Wolny dysk (<200 MB/s) → prawdopodobnie HDD")
-            print(f"     Rozważ przeniesienie datasetu na SSD/NVMe")
+            print("  ⚠️  Wolny dysk (<200 MB/s) → prawdopodobnie HDD")
+            print("     Rozważ przeniesienie datasetu na SSD/NVMe")
         elif read_speed < 1000:
-            print(f"  (SATA SSD)")
+            print("  (SATA SSD)")
         else:
-            print(f"  (NVMe SSD) ✓")
+            print("  (NVMe SSD) ✓")
 
     print()
 
@@ -120,7 +119,7 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
         from hsi_compression.utils import load_project_env
         load_project_env()
-        from hsi_compression.data import build_dataset, build_dataloader
+        from hsi_compression.data import build_dataloader, build_dataset
 
         ds = build_dataset(
             dataset_root=dataset_root,
