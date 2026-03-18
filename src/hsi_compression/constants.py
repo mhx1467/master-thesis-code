@@ -11,7 +11,7 @@ GLOBAL_MAX: float = 10000.0
 PATCH_SIZE: int = 128
 
 DEFAULT_DIFFICULTY: str = "easy"
-DEFAULT_NUM_WORKERS: int = 4
+DEFAULT_NUM_WORKERS: int = 8
 
 DEFAULT_LR: float = 1e-4
 HEAVY_MODEL_LR: float = 1e-5
