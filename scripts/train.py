@@ -83,6 +83,7 @@ def main():
         loss_name = training_cfg.get("loss_name", "mse")
         grad_clip = training_cfg.get("grad_clip_max_norm", 1.0)
         quantization_bits = training_cfg.get("quantization_bits", 8)
+        sam_every         = training_cfg.get("sam_every_n_epochs", 10)
 
         scheduler_cfg = training_cfg.get("scheduler", {})
 
@@ -197,6 +198,7 @@ def main():
                 grad_clip_max_norm=grad_clip,
                 num_input_bands=num_input_bands,
                 quantization_bits=quantization_bits,
+                sam_every_n_epochs=sam_every,
             )
 
         if use_wandb and is_main_process():

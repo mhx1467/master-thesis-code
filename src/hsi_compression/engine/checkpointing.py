@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import torch
@@ -17,11 +18,11 @@ def save_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     checkpoint = {
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
+        "epoch":                epoch,
+        "model_state_dict":     model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-        "config": config,
-        "best_val_loss": best_val_loss,
+        "config":               config,
+        "best_val_loss":        best_val_loss,
     }
     if scheduler is not None:
         checkpoint["scheduler_state_dict"] = scheduler.state_dict()
@@ -33,7 +34,7 @@ def save_checkpoint(
     tmp_path.replace(path)
 
 
-def save_last_checkpoint(
+def save_last_checkpoint_async(
     checkpoint_path: str | Path,
     epoch: int,
     model,
@@ -41,25 +42,38 @@ def save_last_checkpoint(
     config: dict,
     val_metrics: dict,
     scheduler=None,
-) -> None:
+) -> threading.Thread:
+    model_state  = {k: v.cpu() for k, v in model.state_dict().items()}
+    optim_state  = optimizer.state_dict()
+    sched_state  = scheduler.state_dict() if scheduler else None
+
     last_path = Path(checkpoint_path).parent / (
         Path(checkpoint_path).stem.replace("_best", "") + "_last.pt"
     )
-    save_checkpoint(
-        path=last_path,
-        epoch=epoch,
-        model=model,
-        optimizer=optimizer,
-        config=config,
-        best_val_loss=val_metrics.get("loss", float("inf")),
-        scheduler=scheduler,
-        extra={
-            "val_psnr": val_metrics.get("psnr", 0.0),
-            "val_sam_deg": val_metrics.get("sam_deg", 0.0),
-            "val_bpppc": val_metrics.get("bpppc", 0.0),
-            "is_last": True,
-        },
-    )
+
+    def _save():
+        checkpoint = {
+            "epoch":                epoch,
+            "model_state_dict":     model_state,
+            "optimizer_state_dict": optim_state,
+            "config":               config,
+            "best_val_loss":        val_metrics.get("loss", float("inf")),
+        }
+        if sched_state is not None:
+            checkpoint["scheduler_state_dict"] = sched_state
+        checkpoint["extra"] = {
+            "val_psnr":    val_metrics.get("psnr", 0.0),
+            "val_sam_deg": val_metrics.get("sam_deg") or 0.0,
+            "val_bpppc":   val_metrics.get("bpppc", 0.0),
+            "is_last":     True,
+        }
+        tmp = last_path.with_suffix(".tmp")
+        torch.save(checkpoint, tmp)
+        tmp.replace(last_path)
+
+    t = threading.Thread(target=_save, daemon=True)
+    t.start()
+    return t
 
 
 def load_checkpoint(
