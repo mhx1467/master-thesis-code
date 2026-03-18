@@ -10,7 +10,7 @@ class MSELoss(nn.Module):
         self,
         x_hat: torch.Tensor,
         x: torch.Tensor,
-        mask: torch.Tensor,
+        _: torch.Tensor,
     ) -> torch.Tensor:
         return F.mse_loss(x_hat, x)
 
