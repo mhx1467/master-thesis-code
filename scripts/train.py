@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -60,12 +61,23 @@ def main():
     batch_size = data_cfg.get("batch_size", 32)
     num_workers = data_cfg.get("num_workers", 4)
     drop_invalid = data_cfg.get("drop_invalid_channels", True)
+    prefer_npy = data_cfg.get("prefer_npy", True)
+    npy_mmap = data_cfg.get("npy_mmap", False)
+    pin_memory = data_cfg.get("pin_memory", True)
+    persistent_workers = data_cfg.get("persistent_workers", None)
+    prefetch_factor = data_cfg.get("prefetch_factor", 2)
     train_subset = data_cfg.get("train_subset_size", None)
     val_subset = data_cfg.get("val_subset_size", None)
 
     print(
         f"\nDataset: {difficulty} split | drop_invalid_channels={drop_invalid} | normalization: global min-max [0,1]"
     )
+
+    if device.type == "cuda":
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        print(
+            f"GPU memory before data/model: free={free_bytes / 1024**3:.2f} GiB / total={total_bytes / 1024**3:.2f} GiB"
+        )
 
     train_ds = build_dataset(
         dataset_root=dataset_root,
@@ -74,6 +86,8 @@ def main():
         normalized=True,
         return_mask=False,
         drop_invalid_channels=drop_invalid,
+        prefer_npy=prefer_npy,
+        npy_mmap=npy_mmap,
     )
     val_ds = build_dataset(
         dataset_root=dataset_root,
@@ -82,6 +96,8 @@ def main():
         normalized=True,
         return_mask=False,
         drop_invalid_channels=drop_invalid,
+        prefer_npy=prefer_npy,
+        npy_mmap=npy_mmap,
     )
 
     if train_subset:
@@ -89,15 +105,88 @@ def main():
     if val_subset:
         val_ds = Subset(val_ds, list(range(min(val_subset, len(val_ds)))))
 
-    sample = train_ds[0] if not train_subset else train_ds.dataset[0]
-    num_input_bands = sample.shape[0]
+    sample = train_ds[0]
+    if isinstance(sample, dict):
+        sample = sample["x"]
+    sample_tensor = sample if isinstance(sample, torch.Tensor) else torch.as_tensor(sample)
+    num_input_bands = int(sample_tensor.shape[0])
     print(f"Input bands: {num_input_bands} | Train: {len(train_ds)} | Val: {len(val_ds)}")
 
+    train_base_ds = train_ds.dataset if isinstance(train_ds, Subset) else train_ds
+    val_base_ds = val_ds.dataset if isinstance(val_ds, Subset) else val_ds
+    train_using_npy = bool(getattr(train_base_ds, "using_npy", False))
+    val_using_npy = bool(getattr(val_base_ds, "using_npy", False))
+    if hasattr(train_base_ds, "using_npy"):
+        source = ".npy" if train_using_npy else ".TIF"
+        print(f"Train source: {source} | npy_mmap={npy_mmap}")
+    if hasattr(val_base_ds, "using_npy"):
+        source = ".npy" if val_using_npy else ".TIF"
+        print(f"Val source:   {source} | npy_mmap={npy_mmap}")
+
+    debug_loader_timing = data_cfg.get("debug_loader_timing", False)
+    if debug_loader_timing:
+        warmup_batches = data_cfg.get("debug_loader_warmup_batches", 4)
+        timed_batches = data_cfg.get("debug_loader_timed_batches", 16)
+        total_batches = max(1, warmup_batches + timed_batches)
+        timing_loader = build_dataloader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
+        )
+        iterator = iter(timing_loader)
+        load_times = []
+        sync_times = []
+        for step in range(total_batches):
+            t0 = time.perf_counter()
+            batch = next(iterator)
+            t1 = time.perf_counter()
+            if isinstance(batch, dict):
+                x = batch["x"]
+            else:
+                x = batch
+
+            if device.type == "cuda":
+                s0 = time.perf_counter()
+                _ = x.to(device, non_blocking=True)
+                torch.cuda.synchronize(device)
+                s1 = time.perf_counter()
+                sync_times.append(s1 - s0)
+
+            if step >= warmup_batches:
+                load_times.append(t1 - t0)
+
+        if load_times:
+            mean_load = sum(load_times) / len(load_times)
+            p95_idx = max(0, min(len(load_times) - 1, int(0.95 * len(load_times)) - 1))
+            p95_load = sorted(load_times)[p95_idx]
+            print(
+                f"Loader timing ({len(load_times)} batches): mean={mean_load * 1000:.1f}ms, p95={p95_load * 1000:.1f}ms"
+            )
+        if sync_times:
+            mean_sync = sum(sync_times) / len(sync_times)
+            print(f"Host->GPU copy timing: mean={mean_sync * 1000:.1f}ms")
+
     train_loader = build_dataloader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
     val_loader = build_dataloader(
-        val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
 
     model_name = model_cfg.get("model_name")
@@ -111,6 +200,12 @@ def main():
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {model_name} | Parameters: {n_params:,}")
+    if device.type == "cuda":
+        allocated = torch.cuda.memory_allocated(device) / 1024**3
+        reserved = torch.cuda.memory_reserved(device) / 1024**3
+        print(
+            f"GPU memory after model: allocated={allocated:.2f} GiB | reserved={reserved:.2f} GiB"
+        )
 
     epochs = training_cfg.get("epochs", 500)
     lr = training_cfg.get("lr", 1e-4)
@@ -164,6 +259,7 @@ def main():
             resume=args.resume,
         )
 
+    result = None
     if use_wandb:
         with init_wandb(
             project=logging_cfg.get("project", "hsi-compression"),
@@ -173,6 +269,9 @@ def main():
             result = _run(logger=run)
     else:
         result = _run()
+
+    if result is None:
+        raise RuntimeError("Training did not produce results.")
 
     print(f"\n{'=' * 55}")
     print("Training completed.")
