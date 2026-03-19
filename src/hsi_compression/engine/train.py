@@ -18,50 +18,49 @@ def train_one_epoch(
 ):
     model.train()
 
-    total_loss = 0.0
-    total_rmse = 0.0
-    total_psnr = 0.0
+    total_loss = total_rmse = total_psnr = 0.0
     num_batches = 0
+    _mask_cache: dict[tuple, torch.Tensor] = {}
 
     use_progress = show_progress and is_main_process()
-    progress = loader
-    if use_progress:
-        desc = f"Train {epoch}/{total_epochs}" if epoch and total_epochs else "Train"
-        progress = tqdm(loader, desc=desc, leave=False)
+    progress = tqdm(loader, desc=f"Train {epoch}/{total_epochs}", leave=False) \
+        if use_progress else loader
 
     for batch in progress:
         x = batch["x"].to(device, non_blocking=True)
-        mask = batch["valid_mask"].to(device, non_blocking=True)
 
         optimizer.zero_grad()
-
         outputs = model(x)
-        x_hat = outputs["x_hat"]
+        x_hat   = outputs["x_hat"]
+
+        shape = x.shape
+        if shape not in _mask_cache:
+            _mask_cache[shape] = torch.ones(shape, dtype=torch.bool, device=device)
+        mask = _mask_cache[shape]
 
         loss = loss_fn(x_hat, x, mask)
         loss.backward()
 
         if grad_clip_max_norm > 0.0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
-
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=grad_clip_max_norm
+            )
         optimizer.step()
 
         with torch.no_grad():
             rmse_val = masked_rmse(x_hat, x, mask)
             psnr_val = masked_psnr(x_hat, x, mask, data_range=1.0)
 
-        total_loss += loss.item()
-        total_rmse += rmse_val.item()
-        total_psnr += psnr_val.item()
+        total_loss  += loss.item()
+        total_rmse  += rmse_val.item()
+        total_psnr  += psnr_val.item()
         num_batches += 1
 
         if use_progress:
-            progress.set_postfix(
-                {
-                    "loss": f"{loss.item():.5f}",
-                    "psnr": f"{psnr_val.item():.2f}",
-                }
-            )
+            progress.set_postfix({
+                "loss": f"{loss.item():.5f}",
+                "psnr": f"{psnr_val.item():.2f}dB",
+            })
 
     n = max(num_batches, 1)
     return {
