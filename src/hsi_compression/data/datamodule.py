@@ -1,4 +1,3 @@
-import sys
 from pathlib import Path
 
 import torch
@@ -37,7 +36,10 @@ def build_dataset(
 
     transform = None
     if normalized and not npy_available:
-        stats_path = Path(stats_path) if stats_path is not None else default_stats_path(difficulty)
+        stats_path = (
+            Path(stats_path) if stats_path is not None
+            else default_stats_path(difficulty)
+        )
         if not stats_path.exists():
             raise FileNotFoundError(
                 f"No stats found: {stats_path}\n"
@@ -46,8 +48,8 @@ def build_dataset(
         stats = torch.load(stats_path, map_location="cpu", weights_only=True)
         if "global_min" not in stats or "global_max" not in stats:
             raise KeyError(
-                f"Stats file {stats_path} does not contain 'global_min'/'global_max'.\n"
-                f"Generate new stats: python scripts/build_stats.py <dataset_root>"
+                "Stats file missing 'global_min'/'global_max'.\n"
+                "Regenerate: python scripts/build_stats.py <dataset_root>"
             )
         transform = GlobalMinMaxNormalize(
             global_min=float(stats["global_min"]),
@@ -74,12 +76,8 @@ def build_dataloader(
     pin_memory: bool = True,
     persistent_workers: bool = True,
 ) -> DataLoader:
-    if sys.version_info >= (3, 13):
-        persistent_workers = False
-
     use_persistent = persistent_workers and num_workers > 0
-
-    prefetch = 2 if num_workers <= 4 else 1
+    prefetch = 2 if num_workers > 0 else None
 
     return DataLoader(
         dataset,
@@ -89,7 +87,6 @@ def build_dataloader(
         num_workers=num_workers,
         pin_memory=pin_memory and torch.cuda.is_available(),
         persistent_workers=use_persistent,
-        prefetch_factor=prefetch if num_workers > 0 else None,
+        prefetch_factor=prefetch,
         drop_last=False,
-        multiprocessing_context='forkserver' if num_workers > 0 else None,
     )

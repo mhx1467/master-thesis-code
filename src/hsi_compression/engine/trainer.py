@@ -36,7 +36,7 @@ def fit(
     last_sam_deg    = None
     start_epoch     = 1
     history         = []
-    _last_save_thread = None 
+    _last_save_thread = None
 
     training_cfg    = config.get("training", {})
     early_cfg       = training_cfg.get("early_stopping", {})
