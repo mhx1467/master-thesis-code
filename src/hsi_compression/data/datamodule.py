@@ -63,79 +63,20 @@ def build_dataset(
     )
 
 
-class _FastCollator:
-    def __init__(
-        self, batch_size: int, num_bands: int = 202, patch_size: int = 128, use_mask: bool = True
-    ):
-        self.batch_size = batch_size
-        self.use_mask = use_mask
-        self._x_buf = torch.empty(batch_size, num_bands, patch_size, patch_size).pin_memory()
-        self._mask_buf = torch.ones(
-            batch_size, num_bands, patch_size, patch_size, dtype=torch.bool
-        ).pin_memory()
-
-    def __call__(self, batch: list[dict]) -> dict:
-        n = len(batch)
-        x_out = self._x_buf[:n]
-        torch.stack([item["x"] for item in batch], out=x_out)
-
-        result = {
-            "x": x_out,
-            "patch_id": [item["patch_id"] for item in batch],
-        }
-        if self.use_mask:
-            result["valid_mask"] = self._mask_buf[:n]
-
-        return result
-
-
 def build_dataloader(
     dataset,
     batch_size: int,
     shuffle: bool,
     num_workers: int = DEFAULT_NUM_WORKERS,
     sampler=None,
-    _: bool = True,
-    persistent_workers: bool = True,
+    pin_memory: bool = True,
 ) -> DataLoader:
-    use_persistent = persistent_workers and num_workers > 0
-    prefetch = 2 if num_workers > 0 else None
-
-    ds = dataset.dataset if hasattr(dataset, "dataset") else dataset
-    num_bands = getattr(ds, "_npy_bands", 202)
-    patch_size = getattr(ds, "_patch_size", 128)
-    has_mask = True
-
-    if num_bands == 202 and not hasattr(ds, "_npy_bands"):
-        try:
-            s = ds.paths[0] if hasattr(ds, "paths") else None
-            if s is not None:
-                import numpy as np
-
-                npy = ds._tif_to_npy_path(s)
-                if npy.exists():
-                    shape = np.load(str(npy), mmap_mode="r").shape
-                    num_bands = shape[0] if shape[0] < shape[1] else shape[2]
-                    patch_size = shape[1]
-        except Exception:
-            pass
-
-    collate_fn = _FastCollator(
-        batch_size=batch_size,
-        num_bands=num_bands,
-        patch_size=patch_size,
-        use_mask=has_mask,
-    )
-
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=(shuffle if sampler is None else False),
         sampler=sampler,
         num_workers=num_workers,
-        pin_memory=False,
-        persistent_workers=use_persistent,
-        prefetch_factor=prefetch,
+        pin_memory=pin_memory,
         drop_last=False,
-        collate_fn=collate_fn,
     )

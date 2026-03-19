@@ -20,8 +20,10 @@ class MaskedMSELoss(nn.Module):
         self,
         x_hat: torch.Tensor,
         x: torch.Tensor,
-        mask: torch.Tensor,
+        mask: torch.Tensor | None,
     ) -> torch.Tensor:
+        if mask is None:
+            return F.mse_loss(x_hat, x)
         return masked_mse(x_hat, x, mask)
 
 
@@ -34,8 +36,21 @@ class MaskedHybridLoss(nn.Module):
         self,
         x_hat: torch.Tensor,
         x: torch.Tensor,
-        mask: torch.Tensor,
+        mask: torch.Tensor | None,
     ) -> torch.Tensor:
+        if mask is None:
+            mse_val = F.mse_loss(x_hat, x)
+            x_hat_p = x_hat.permute(0, 2, 3, 1)
+            x_p = x.permute(0, 2, 3, 1)
+            cos = F.cosine_similarity(
+                x_hat_p.reshape(-1, x_hat_p.shape[-1]),
+                x_p.reshape(-1, x_p.shape[-1]),
+                dim=-1,
+                eps=1e-8,
+            )
+            spectral_loss = (1.0 - cos.clamp(-1.0, 1.0)).mean()
+            return mse_val + self.alpha * spectral_loss
+
         mse_val = masked_mse(x_hat, x, mask)
 
         x_hat_p = x_hat.permute(0, 2, 3, 1)

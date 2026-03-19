@@ -10,13 +10,7 @@ from tqdm.auto import tqdm
 
 from hsi_compression.data import build_dataloader, build_dataset
 from hsi_compression.engine.checkpointing import load_checkpoint
-from hsi_compression.metrics import (
-    estimate_bpppc,
-    masked_mse,
-    masked_psnr,
-    masked_rmse,
-    masked_sam_deg,
-)
+from hsi_compression.metrics import estimate_bpppc, mse, psnr, sam_deg
 from hsi_compression.models.registry import build_model
 from hsi_compression.paths import ensure_artifact_dirs, logs_dir
 from hsi_compression.utils import load_project_env
@@ -53,29 +47,30 @@ def evaluate_model(
 ):
     model.eval()
 
-    total_loss = total_rmse = total_psnr = total_sam = total_bpppc = 0.0
+    total_loss = total_psnr = total_sam = total_bpppc = 0.0
     num_batches = 0
     latent_shape = None
 
     progress = tqdm(loader, desc=f"Evaluate [{split_name}]") if show_progress else loader
 
     for batch in progress:
-        x = batch["x"].to(device)
-        mask = batch["valid_mask"].to(device)
+        x = (
+            batch["x"].to(device, non_blocking=True)
+            if isinstance(batch, dict)
+            else batch.to(device, non_blocking=True)
+        )
 
         outputs = model(x)
         x_hat = outputs["x_hat"]
         z = outputs.get("z")
 
-        loss = masked_mse(x_hat, x, mask)
-        rmse = masked_rmse(x_hat, x, mask)
-        psnr = masked_psnr(x_hat, x, mask, data_range=1.0)
-        sam = masked_sam_deg(x_hat, x, mask)
+        loss = mse(x_hat, x)
+        psnr_val = psnr(x_hat, x, data_range=1.0)
+        sam_val = sam_deg(x_hat, x)
 
         total_loss += loss.item()
-        total_rmse += rmse.item()
-        total_psnr += psnr.item()
-        total_sam += sam.item()
+        total_psnr += psnr_val.item()
+        total_sam += sam_val.item()
         num_batches += 1
 
         if z is not None:
@@ -88,15 +83,16 @@ def evaluate_model(
         if show_progress:
             progress.set_postfix(
                 {
-                    "psnr": f"{psnr.item():.2f}dB",
-                    "sam": f"{sam.item():.2f}°",
+                    "mse": f"{loss.item():.6f}",
+                    "psnr": f"{psnr_val.item():.2f}dB",
+                    "sam": f"{sam_val.item():.2f}°",
                 }
             )
 
     n = max(num_batches, 1)
     return {
         "loss": total_loss / n,
-        "rmse": total_rmse / n,
+        "mse": total_loss / n,
         "psnr": total_psnr / n,
         "sam_deg": total_sam / n,
         "bpppc": total_bpppc / n,
@@ -137,7 +133,7 @@ def main():
         split_name=args.split,
         difficulty=difficulty,
         normalized=True,
-        return_mask=True,
+        return_mask=False,
         drop_invalid_channels=True,
     )
     if args.subset_size:
@@ -147,7 +143,9 @@ def main():
         ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
 
-    sample_x = (ds[0] if not args.subset_size else ds.dataset[0])["x"]
+    sample_x = ds[0] if not args.subset_size else ds.dataset[0]
+    if isinstance(sample_x, dict):
+        sample_x = sample_x["x"]
     num_input_bands = sample_x.shape[0]
     print(f"Input bands: {num_input_bands}")
 
@@ -185,8 +183,7 @@ def main():
     print(f"{'-' * 55}")
     print(f"  PSNR:       {metrics['psnr']:.4f} dB")
     print(f"  SAM:        {metrics['sam_deg']:.4f} °")
-    print(f"  RMSE:       {metrics['rmse']:.6f}")
-    print(f"  MSE:        {metrics['loss']:.6f}")
+    print(f"  MSE:        {metrics['mse']:.6f}")
     print(f"  bpppc:      {metrics['bpppc']:.6f}")
     print(f"  Latent:     {metrics['latent_shape']}")
     print(f"  CR proxy:   {cr_proxy}")
@@ -227,7 +224,7 @@ def main():
                 {
                     "eval/psnr": metrics["psnr"],
                     "eval/sam_deg": metrics["sam_deg"],
-                    "eval/rmse": metrics["rmse"],
+                    "eval/mse": metrics["mse"],
                     "eval/bpppc": metrics["bpppc"],
                 }
             )

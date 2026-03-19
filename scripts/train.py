@@ -72,7 +72,7 @@ def main():
         split_name="train",
         difficulty=difficulty,
         normalized=True,
-        return_mask=True,
+        return_mask=False,
         drop_invalid_channels=drop_invalid,
     )
     val_ds = build_dataset(
@@ -80,7 +80,7 @@ def main():
         split_name="val",
         difficulty=difficulty,
         normalized=True,
-        return_mask=True,
+        return_mask=False,
         drop_invalid_channels=drop_invalid,
     )
 
@@ -90,7 +90,7 @@ def main():
         val_ds = Subset(val_ds, list(range(min(val_subset, len(val_ds)))))
 
     sample = train_ds[0] if not train_subset else train_ds.dataset[0]
-    num_input_bands = sample["x"].shape[0]
+    num_input_bands = sample.shape[0]
     print(f"Input bands: {num_input_bands} | Train: {len(train_ds)} | Val: {len(val_ds)}")
 
     train_loader = build_dataloader(
@@ -176,6 +176,7 @@ def main():
 
     print(f"\n{'=' * 55}")
     print("Training completed.")
+    print(f"Best val/loss: {result['best_val_loss']:.6f}")
     print(f"Best val/psnr: {result['best_val_psnr']:.2f} dB")
     print(f"Checkpoint:    {ckpt_path}")
 

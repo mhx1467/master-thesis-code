@@ -63,34 +63,32 @@ class HSITiffDataset(Dataset):
         path = self.paths[idx]
 
         if self._use_npy:
-            x, valid_mask = self._load_npy(path)
+            x = self._load_npy(path)
+            x_tensor = torch.from_numpy(np.array(x, dtype=np.float32, order="C"))
+            if self.transform is not None:
+                x_tensor = self.transform(x_tensor)
         else:
             x, valid_mask = self._load_tif(path)
+            x_tensor = torch.from_numpy(np.array(x, dtype=np.float32, order="C"))
+            mask_tensor = torch.from_numpy(valid_mask)
+            if self.transform is not None:
+                x_tensor = self.transform(x_tensor, mask_tensor)
 
-        x_tensor = torch.from_numpy(np.array(x, dtype=np.float32, order="C"))
-        mask_tensor = torch.from_numpy(valid_mask)
+            if self.return_mask:
+                patch_id = path.stem.replace("-SPECTRAL_IMAGE", "")
+                return {
+                    "x": x_tensor,
+                    "valid_mask": mask_tensor,
+                    "path": str(path),
+                    "patch_id": patch_id,
+                }
 
-        if self.transform is not None:
-            x_tensor = self.transform(x_tensor, mask_tensor)
-
-        patch_id = path.stem.replace("-SPECTRAL_IMAGE", "")
-
-        if self.return_mask:
-            return {
-                "x": x_tensor,
-                "valid_mask": mask_tensor,
-                "path": str(path),
-                "patch_id": patch_id,
-            }
         return x_tensor
 
     def _load_npy(self, tif_path: Path):
         npy_path = self._tif_to_npy_path(tif_path)
         data = np.load(str(npy_path))
-        result = data if self._npy_is_chw else data.transpose(2, 0, 1)
-
-        valid_mask = np.ones((202, 128, 128), dtype=bool)
-        return result, valid_mask
+        return data if self._npy_is_chw else data.transpose(2, 0, 1)
 
     def _load_tif(self, path: Path):
         x = tiff.imread(str(path))
