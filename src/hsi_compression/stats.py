@@ -13,6 +13,8 @@ def compute_global_minmax(
         batch_size=1,
         shuffle=False,
         num_workers=num_workers,
+        pin_memory=True,
+        drop_last=False,
     )
 
     global_min = float("inf")
@@ -23,10 +25,18 @@ def compute_global_minmax(
         if max_samples is not None and i >= max_samples:
             break
 
-        x = batch["x"].squeeze(0).float()  # (C, H, W)
-        m = batch["valid_mask"].squeeze(0)  # (C, H, W) bool
+        if isinstance(batch, dict):
+            x = batch["x"].squeeze(0).float()
+            mask = batch.get("valid_mask")
+            if mask is not None:
+                mask = mask.squeeze(0)
+                valid_vals = x[mask]
+            else:
+                valid_vals = x.reshape(-1)
+        else:
+            x = batch.squeeze(0).float()
+            valid_vals = x.reshape(-1)
 
-        valid_vals = x[m]
         if valid_vals.numel() == 0:
             continue
 

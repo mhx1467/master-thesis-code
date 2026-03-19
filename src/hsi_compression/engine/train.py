@@ -1,7 +1,7 @@
 import torch
 from tqdm.auto import tqdm
 
-from hsi_compression.metrics import masked_psnr, masked_rmse
+from hsi_compression.metrics import psnr, sam_deg
 from hsi_compression.utils.distributed import is_main_process, reduce_mean
 
 
@@ -18,9 +18,8 @@ def train_one_epoch(
 ):
     model.train()
 
-    total_loss = total_rmse = total_psnr = 0.0
+    total_loss = total_mse = total_psnr = total_sam = 0.0
     num_batches = 0
-    _mask_cache: dict[tuple, torch.Tensor] = {}
 
     use_progress = show_progress and is_main_process()
     progress = (
@@ -28,18 +27,17 @@ def train_one_epoch(
     )
 
     for batch in progress:
-        x = batch["x"].to(device, non_blocking=True)
+        x = (
+            batch["x"].to(device, non_blocking=True)
+            if isinstance(batch, dict)
+            else batch.to(device, non_blocking=True)
+        )
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         outputs = model(x)
         x_hat = outputs["x_hat"]
 
-        shape = x.shape
-        if shape not in _mask_cache:
-            _mask_cache[shape] = torch.ones(shape, dtype=torch.bool, device=device)
-        mask = _mask_cache[shape]
-
-        loss = loss_fn(x_hat, x, mask)
+        loss = loss_fn(x_hat, x, None)
         loss.backward()
 
         if grad_clip_max_norm > 0.0:
@@ -47,12 +45,14 @@ def train_one_epoch(
         optimizer.step()
 
         with torch.no_grad():
-            rmse_val = masked_rmse(x_hat, x, mask)
-            psnr_val = masked_psnr(x_hat, x, mask, data_range=1.0)
+            mse_val = torch.mean((x_hat - x) ** 2)
+            psnr_val = psnr(x_hat, x, data_range=1.0)
+            sam_val = sam_deg(x_hat, x)
 
         total_loss += loss.item()
-        total_rmse += rmse_val.item()
+        total_mse += mse_val.item()
         total_psnr += psnr_val.item()
+        total_sam += sam_val.item()
         num_batches += 1
 
         if use_progress:
@@ -66,6 +66,7 @@ def train_one_epoch(
     n = max(num_batches, 1)
     return {
         "loss": reduce_mean(total_loss / n, device),
-        "rmse": reduce_mean(total_rmse / n, device),
+        "mse": reduce_mean(total_mse / n, device),
         "psnr": reduce_mean(total_psnr / n, device),
+        "sam_deg": reduce_mean(total_sam / n, device),
     }

@@ -32,6 +32,7 @@ def fit(
     sam_every_n_epochs: int = 10,
 ):
     checkpoint_path = Path(checkpoint_path)
+    best_val_loss = float("inf")
     best_val_psnr = float("-inf")
     last_sam_deg = None
     start_epoch = 1
@@ -57,8 +58,9 @@ def fit(
                 map_location=device,
             )
             start_epoch = ckpt["epoch"] + 1
-            best_val_psnr = ckpt.get("extra", {}).get("val_psnr", float("-inf"))
-            print(f"Resumed {start_epoch} | Best PSNR: {best_val_psnr:.2f} dB\n")
+            best_val_loss = ckpt.get("best_val_loss", float("inf"))
+            best_val_psnr = ckpt.get("extra", {}).get("best_val_psnr", float("-inf"))
+            print(f"Resumed {start_epoch} | Best loss: {best_val_loss:.6f} | Best PSNR: {best_val_psnr:.2f} dB\n")
         elif is_main_process():
             print("No last.pt found — starting training from scratch.")
 
@@ -115,10 +117,10 @@ def fit(
         record = {
             "epoch": epoch,
             "train/loss": train_metrics["loss"],
-            "train/rmse": train_metrics["rmse"],
+            "train/mse": train_metrics["mse"],
             "train/psnr": train_metrics["psnr"],
             "val/loss": val_metrics["loss"],
-            "val/rmse": val_metrics["rmse"],
+            "val/mse": val_metrics["mse"],
             "val/psnr": val_metrics["psnr"],
             "val/bpppc": val_metrics["bpppc"],
         }
@@ -164,8 +166,10 @@ def fit(
                 scheduler=scheduler,
             )
 
+            val_loss = record["val/loss"]
             val_psnr = record["val/psnr"]
-            if val_psnr > best_val_psnr + early_min_delta:
+            if val_loss < best_val_loss - early_min_delta:
+                best_val_loss = val_loss
                 best_val_psnr = val_psnr
                 epochs_without_improvement = 0
                 save_checkpoint(
@@ -174,7 +178,7 @@ def fit(
                     model=model_raw,
                     optimizer=optimizer,
                     config=config,
-                    best_val_loss=val_metrics["loss"],
+                    best_val_loss=best_val_loss,
                     scheduler=scheduler,
                     extra={
                         "latent_shape": latent_shape,
@@ -184,9 +188,10 @@ def fit(
                         "cr_proxy": cr_proxy,
                     },
                 )
-                print(f"New best (PSNR={best_val_psnr:.2f} dB)")
+                print(f"New best (loss={best_val_loss:.6f}, PSNR={best_val_psnr:.2f} dB)")
 
                 if logger is not None:
+                    logger.summary["best_val_loss"] = best_val_loss
                     logger.summary["best_val_psnr"] = best_val_psnr
                     logger.summary["best_val_bpppc"] = record["val/bpppc"]
                     logger.summary["best_epoch"] = epoch
@@ -198,6 +203,7 @@ def fit(
                         type="model",
                         metadata={
                             "epoch": epoch,
+                            "val_loss": best_val_loss,
                             "val_psnr": best_val_psnr,
                             "val_sam_deg": last_sam_deg,
                             "val_bpppc": record["val/bpppc"],
@@ -218,4 +224,4 @@ def fit(
     if _last_save_thread is not None:
         _last_save_thread.join()
 
-    return {"best_val_psnr": best_val_psnr, "history": history}
+    return {"best_val_loss": best_val_loss, "best_val_psnr": best_val_psnr, "history": history}
