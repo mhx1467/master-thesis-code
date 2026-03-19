@@ -64,12 +64,20 @@ class HSITiffDataset(Dataset):
 
         if self._use_npy:
             x = self._load_npy(path)
-            x_tensor = torch.from_numpy(np.array(x, dtype=np.float32, order="C"))
+            if not x.flags.writeable:
+                x = np.array(x, copy=True)
+            if x.dtype != np.float32 or not x.flags.c_contiguous:
+                x = np.ascontiguousarray(x, dtype=np.float32)
+            x_tensor = torch.from_numpy(x)
             if self.transform is not None:
                 x_tensor = self.transform(x_tensor)
         else:
             x, valid_mask = self._load_tif(path)
-            x_tensor = torch.from_numpy(np.array(x, dtype=np.float32, order="C"))
+            if x.dtype != np.float32 or not x.flags.c_contiguous:
+                x = np.ascontiguousarray(x, dtype=np.float32)
+            if not valid_mask.flags.c_contiguous:
+                valid_mask = np.ascontiguousarray(valid_mask)
+            x_tensor = torch.from_numpy(x)
             mask_tensor = torch.from_numpy(valid_mask)
             if self.transform is not None:
                 x_tensor = self.transform(x_tensor, mask_tensor)
@@ -87,8 +95,9 @@ class HSITiffDataset(Dataset):
 
     def _load_npy(self, tif_path: Path):
         npy_path = self._tif_to_npy_path(tif_path)
-        data = np.load(str(npy_path))
-        return data if self._npy_is_chw else data.transpose(2, 0, 1)
+        data = np.load(str(npy_path), mmap_mode="r" if self.npy_mmap else None)
+        out = data if self._npy_is_chw else data.transpose(2, 0, 1)
+        return out
 
     def _load_tif(self, path: Path):
         x = tiff.imread(str(path))

@@ -24,6 +24,7 @@ def build_dataset(
     return_mask: bool = True,
     drop_invalid_channels: bool = True,
     prefer_npy: bool = True,
+    npy_mmap: bool = False,
 ):
     dataset_root = Path(dataset_root)
     csv_path = split_csv_path(dataset_root, split_name, difficulty)
@@ -60,6 +61,7 @@ def build_dataset(
         invalid_channels=WATER_VAPOR_BANDS,
         drop_invalid_channels=drop_invalid_channels,
         prefer_npy=prefer_npy,
+        npy_mmap=npy_mmap,
     )
 
 
@@ -70,13 +72,23 @@ def build_dataloader(
     num_workers: int = DEFAULT_NUM_WORKERS,
     sampler=None,
     pin_memory: bool = True,
+    persistent_workers: bool | None = None,
+    prefetch_factor: int | None = 2,
 ) -> DataLoader:
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=(shuffle if sampler is None else False),
-        sampler=sampler,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False,
-    )
+    kwargs = {
+        "batch_size": batch_size,
+        "shuffle": (shuffle if sampler is None else False),
+        "sampler": sampler,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "drop_last": False,
+    }
+
+    if num_workers > 0:
+        kwargs["persistent_workers"] = (
+            persistent_workers if persistent_workers is not None else True
+        )
+        if prefetch_factor is not None:
+            kwargs["prefetch_factor"] = prefetch_factor
+
+    return DataLoader(dataset, **kwargs)
