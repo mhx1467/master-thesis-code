@@ -15,6 +15,20 @@ class MSELoss(nn.Module):
         return F.mse_loss(x_hat, x)
 
 
+class RMSELoss(nn.Module):
+    def __init__(self, eps: float = 1e-12):
+        super().__init__()
+        self.eps = eps
+
+    def forward(
+        self,
+        x_hat: torch.Tensor,
+        x: torch.Tensor,
+        _: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.sqrt(F.mse_loss(x_hat, x) + self.eps)
+
+
 class MaskedMSELoss(nn.Module):
     def forward(
         self,
@@ -69,6 +83,7 @@ class MaskedHybridLoss(nn.Module):
 
 LOSS_REGISTRY = {
     "mse": MSELoss(),
+    "rmse": RMSELoss(),
     "masked_mse": MaskedMSELoss(),
     "hybrid_mse_sam": MaskedHybridLoss(alpha=0.1),
 }

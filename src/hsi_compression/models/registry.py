@@ -1,5 +1,7 @@
 from hsi_compression.models import (
+    Baseline1DAutoencoder,
     Baseline2DAutoencoder,
+    Baseline3DAutoencoder,
     TCNHSIAutoencoder,
     TCNHSIAutoencoderV2,
     TinyHSIAutoencoder,
@@ -18,6 +20,22 @@ def build_baseline_2d_ae(in_channels: int, **kwargs):
         in_channels=in_channels,
         hidden_channels=tuple(kwargs.get("hidden_channels", (128, 64))),
         latent_channels=kwargs.get("latent_channels", 16),
+    )
+
+
+def build_baseline_1d_ae(in_channels: int, **kwargs):
+    return Baseline1DAutoencoder(
+        in_channels=in_channels,
+        latent_channels=kwargs.get("latent_channels", 16),
+        spectral_hidden_channels=kwargs.get("spectral_hidden_channels", 64),
+    )
+
+
+def build_baseline_3d_ae(in_channels: int, **kwargs):
+    return Baseline3DAutoencoder(
+        in_channels=in_channels,
+        latent_channels=kwargs.get("latent_channels", 16),
+        hidden_channels=tuple(kwargs.get("hidden_channels", (32, 64))),
     )
 
 
@@ -47,7 +65,9 @@ def build_tcn_hsi_ae_v2(in_channels: int, **kwargs):
 
 MODEL_REGISTRY = {
     "tiny_ae": build_tiny_ae,
+    "baseline_1d_ae": build_baseline_1d_ae,
     "baseline_2d_ae": build_baseline_2d_ae,
+    "baseline_3d_ae": build_baseline_3d_ae,
     "tcn_hsi_ae": build_tcn_hsi_ae,
     "tcn_hsi_ae_v2": build_tcn_hsi_ae_v2,
 }

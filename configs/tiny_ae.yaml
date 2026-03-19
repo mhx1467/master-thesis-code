@@ -13,7 +13,7 @@ data:
 training:
   epochs: 20
   lr: 0.0001
-  loss_name: masked_mse
+  loss_name: mse
   debug_reconstruction_stats: true
 
   early_stopping:
