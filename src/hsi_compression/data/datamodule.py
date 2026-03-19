@@ -69,20 +69,20 @@ class _FastCollator:
     ):
         self.batch_size = batch_size
         self.use_mask = use_mask
-        self._x_buf = torch.empty(batch_size, num_bands, patch_size, patch_size)
-        self._mask_buf = torch.ones(batch_size, num_bands, patch_size, patch_size, dtype=torch.bool)
+        self._x_buf = torch.empty(batch_size, num_bands, patch_size, patch_size).pin_memory()
+        self._mask_buf = torch.ones(
+            batch_size, num_bands, patch_size, patch_size, dtype=torch.bool
+        ).pin_memory()
 
     def __call__(self, batch: list[dict]) -> dict:
         n = len(batch)
         x_out = self._x_buf[:n]
-        for i, item in enumerate(batch):
-            x_out[i].copy_(item["x"])
+        torch.stack([item["x"] for item in batch], out=x_out)
 
         result = {
             "x": x_out,
             "patch_id": [item["patch_id"] for item in batch],
         }
-
         if self.use_mask:
             result["valid_mask"] = self._mask_buf[:n]
 
@@ -95,25 +95,30 @@ def build_dataloader(
     shuffle: bool,
     num_workers: int = DEFAULT_NUM_WORKERS,
     sampler=None,
-    pin_memory: bool = True,
+    _: bool = True,
     persistent_workers: bool = True,
 ) -> DataLoader:
     use_persistent = persistent_workers and num_workers > 0
     prefetch = 2 if num_workers > 0 else None
 
-    using_npy = getattr(dataset, "_use_npy", False)
-    if not using_npy and hasattr(dataset, "dataset"):
-        using_npy = getattr(dataset.dataset, "_use_npy", False)
+    ds = dataset.dataset if hasattr(dataset, "dataset") else dataset
+    num_bands = getattr(ds, "_npy_bands", 202)
+    patch_size = getattr(ds, "_patch_size", 128)
+    has_mask = True
 
-    try:
-        sample = dataset[0] if not hasattr(dataset, "dataset") else dataset.dataset[0]
-        num_bands = sample["x"].shape[0]
-        patch_size = sample["x"].shape[1]
-        has_mask = "valid_mask" in sample
-    except Exception:
-        num_bands = 202
-        patch_size = 128
-        has_mask = True
+    if num_bands == 202 and not hasattr(ds, "_npy_bands"):
+        try:
+            s = ds.paths[0] if hasattr(ds, "paths") else None
+            if s is not None:
+                import numpy as np
+
+                npy = ds._tif_to_npy_path(s)
+                if npy.exists():
+                    shape = np.load(str(npy), mmap_mode="r").shape
+                    num_bands = shape[0] if shape[0] < shape[1] else shape[2]
+                    patch_size = shape[1]
+        except Exception:
+            pass
 
     collate_fn = _FastCollator(
         batch_size=batch_size,
@@ -128,7 +133,7 @@ def build_dataloader(
         shuffle=(shuffle if sampler is None else False),
         sampler=sampler,
         num_workers=num_workers,
-        pin_memory=pin_memory and torch.cuda.is_available(),
+        pin_memory=False,
         persistent_workers=use_persistent,
         prefetch_factor=prefetch,
         drop_last=False,
