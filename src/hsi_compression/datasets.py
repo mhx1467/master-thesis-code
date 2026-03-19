@@ -22,7 +22,7 @@ class HSITiffDataset(Dataset):
         invalid_channels: list[int] | None = None,
         drop_invalid_channels: bool = True,
         prefer_npy: bool = True,
-        npy_mmap: bool = True,
+        npy_mmap: bool = False,
     ):
         self.paths = [Path(p) for p in paths]
         self.nodata_value = nodata_value
@@ -87,8 +87,7 @@ class HSITiffDataset(Dataset):
 
     def _load_npy(self, tif_path: Path):
         npy_path = self._tif_to_npy_path(tif_path)
-        data = np.load(str(npy_path), mmap_mode='r' if self.npy_mmap else None)
-
+        data = np.load(str(npy_path))
         if self._npy_is_chw:
             result = data
         else:
