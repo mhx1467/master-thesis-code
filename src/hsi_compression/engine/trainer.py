@@ -43,7 +43,7 @@ def fit(
     early_cfg = training_cfg.get("early_stopping", {})
     early_enabled = early_cfg.get("enabled", False)
     early_patience = early_cfg.get("patience", 20)
-    early_min_delta = early_cfg.get("min_delta", 0.0)
+    early_psnr_min_delta = early_cfg.get("psnr_min_delta", early_cfg.get("min_delta", 0.0))
     epochs_without_improvement = 0
 
     if resume:
@@ -60,7 +60,9 @@ def fit(
             start_epoch = ckpt["epoch"] + 1
             best_val_loss = ckpt.get("best_val_loss", float("inf"))
             best_val_psnr = ckpt.get("extra", {}).get("best_val_psnr", float("-inf"))
-            print(f"Resumed {start_epoch} | Best loss: {best_val_loss:.6f} | Best PSNR: {best_val_psnr:.2f} dB\n")
+            print(
+                f"Resumed {start_epoch} | Best loss: {best_val_loss:.6f} | Best PSNR: {best_val_psnr:.2f} dB\n"
+            )
         elif is_main_process():
             print("No last.pt found — starting training from scratch.")
 
@@ -168,7 +170,7 @@ def fit(
 
             val_loss = record["val/loss"]
             val_psnr = record["val/psnr"]
-            if val_loss < best_val_loss - early_min_delta:
+            if val_psnr > best_val_psnr + early_psnr_min_delta:
                 best_val_loss = val_loss
                 best_val_psnr = val_psnr
                 epochs_without_improvement = 0
@@ -188,7 +190,7 @@ def fit(
                         "cr_proxy": cr_proxy,
                     },
                 )
-                print(f"New best (loss={best_val_loss:.6f}, PSNR={best_val_psnr:.2f} dB)")
+                print(f"New best PSNR ({best_val_psnr:.2f} dB, loss={best_val_loss:.6f})")
 
                 if logger is not None:
                     logger.summary["best_val_loss"] = best_val_loss

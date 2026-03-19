@@ -24,7 +24,7 @@ training:
   early_stopping:
     enabled: true
     patience: 50
-    min_delta: 0.01
+    psnr_min_delta: 0.01
 
 model:
   model_name: baseline_2d_ae
