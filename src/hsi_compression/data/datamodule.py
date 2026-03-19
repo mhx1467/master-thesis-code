@@ -43,7 +43,7 @@ def build_dataset(
         if not stats_path.exists():
             raise FileNotFoundError(
                 f"No stats found: {stats_path}\n"
-                f"Run: python scripts/build_stats.py {dataset_root} --difficulty {difficulty}"
+                f"Run: python scripts/build_stats.py {dataset_root}"
             )
         stats = torch.load(stats_path, map_location="cpu", weights_only=True)
         if "global_min" not in stats or "global_max" not in stats:
@@ -67,6 +67,32 @@ def build_dataset(
     )
 
 
+class _FastCollator:
+    def __init__(self, batch_size: int, num_bands: int = 202,
+                 patch_size: int = 128, use_mask: bool = True):
+        self.batch_size = batch_size
+        self.use_mask   = use_mask
+        self._x_buf    = torch.empty(batch_size, num_bands, patch_size, patch_size)
+        self._mask_buf = torch.ones(batch_size, num_bands, patch_size, patch_size,
+                                    dtype=torch.bool)
+
+    def __call__(self, batch: list[dict]) -> dict:
+        n = len(batch)
+        x_out = self._x_buf[:n]
+        for i, item in enumerate(batch):
+            x_out[i].copy_(item["x"])
+
+        result = {
+            "x":          x_out,
+            "patch_id":   [item["patch_id"] for item in batch],
+        }
+
+        if self.use_mask:
+            result["valid_mask"] = self._mask_buf[:n]
+
+        return result
+
+
 def build_dataloader(
     dataset,
     batch_size: int,
@@ -79,6 +105,27 @@ def build_dataloader(
     use_persistent = persistent_workers and num_workers > 0
     prefetch = 2 if num_workers > 0 else None
 
+    using_npy = getattr(dataset, '_use_npy', False)
+    if not using_npy and hasattr(dataset, 'dataset'):
+        using_npy = getattr(dataset.dataset, '_use_npy', False)
+
+    try:
+        sample = dataset[0] if not hasattr(dataset, 'dataset') else dataset.dataset[0]
+        num_bands  = sample["x"].shape[0]
+        patch_size = sample["x"].shape[1]
+        has_mask   = "valid_mask" in sample
+    except Exception:
+        num_bands  = 202
+        patch_size = 128
+        has_mask   = True
+
+    collate_fn = _FastCollator(
+        batch_size=batch_size,
+        num_bands=num_bands,
+        patch_size=patch_size,
+        use_mask=has_mask,
+    )
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -89,4 +136,5 @@ def build_dataloader(
         persistent_workers=use_persistent,
         prefetch_factor=prefetch,
         drop_last=False,
+        collate_fn=collate_fn,
     )
