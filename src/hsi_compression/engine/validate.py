@@ -28,18 +28,19 @@ def validate_one_epoch(
     total_loss = total_rmse = total_psnr = total_sam = total_bpppc = 0.0
     num_batches = 0
     latent_shape = None
+    _mask_cache: dict[tuple, torch.Tensor] = {}
 
     use_progress = show_progress and is_main_process()
-    progress = loader
-    if use_progress:
-        desc = f"Val {epoch}/{total_epochs}" if epoch and total_epochs else "Val"
-        if not compute_sam:
-            desc += " (fast)"
-        progress = tqdm(loader, desc=desc, leave=False)
+    desc = f"Val {epoch}/{total_epochs}" + ("" if compute_sam else " (fast)")
+    progress = tqdm(loader, desc=desc, leave=False) if use_progress else loader
 
     for batch in progress:
-        x    = batch["x"].to(device, non_blocking=True)
-        mask = batch["valid_mask"].to(device, non_blocking=True)
+        x = batch["x"].to(device, non_blocking=True)
+
+        shape = x.shape
+        if shape not in _mask_cache:
+            _mask_cache[shape] = torch.ones(shape, dtype=torch.bool, device=device)
+        mask = _mask_cache[shape]
 
         outputs  = model(x)
         x_hat    = outputs["x_hat"]
@@ -49,9 +50,9 @@ def validate_one_epoch(
         rmse_val = masked_rmse(x_hat, x, mask)
         psnr_val = masked_psnr(x_hat, x, mask, data_range=1.0)
 
-        total_loss += loss_val.item()
-        total_rmse += rmse_val.item()
-        total_psnr += psnr_val.item()
+        total_loss  += loss_val.item()
+        total_rmse  += rmse_val.item()
+        total_psnr  += psnr_val.item()
         num_batches += 1
 
         if compute_sam:
@@ -67,10 +68,8 @@ def validate_one_epoch(
             )
 
         if use_progress:
-            postfix = {
-                "loss": f"{loss_val.item():.5f}",
-                "psnr": f"{psnr_val.item():.2f}dB",
-            }
+            postfix = {"loss": f"{loss_val.item():.5f}",
+                       "psnr": f"{psnr_val.item():.2f}dB"}
             if compute_sam:
                 postfix["sam"] = f"{sam_val.item():.2f}°"
             progress.set_postfix(postfix)
