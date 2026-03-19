@@ -32,33 +32,35 @@ def fit(
     sam_every_n_epochs: int = 10,
 ):
     checkpoint_path = Path(checkpoint_path)
-    best_val_psnr   = float("-inf")
-    last_sam_deg    = None
-    start_epoch     = 1
-    history         = []
+    best_val_psnr = float("-inf")
+    last_sam_deg = None
+    start_epoch = 1
+    history = []
     _last_save_thread = None
 
-    training_cfg    = config.get("training", {})
-    early_cfg       = training_cfg.get("early_stopping", {})
-    early_enabled   = early_cfg.get("enabled", False)
-    early_patience  = early_cfg.get("patience", 20)
+    training_cfg = config.get("training", {})
+    early_cfg = training_cfg.get("early_stopping", {})
+    early_enabled = early_cfg.get("enabled", False)
+    early_patience = early_cfg.get("patience", 20)
     early_min_delta = early_cfg.get("min_delta", 0.0)
     epochs_without_improvement = 0
 
     if resume:
         last_path = find_resume_checkpoint(checkpoint_path)
         if last_path is not None and is_main_process():
-            print(f"\nWznawianie z: {last_path}")
+            print(f"\nResuming from: {last_path}")
             ckpt = load_checkpoint(
-                path=last_path, model=model,
-                optimizer=optimizer, scheduler=scheduler,
+                path=last_path,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
                 map_location=device,
             )
-            start_epoch   = ckpt["epoch"] + 1
+            start_epoch = ckpt["epoch"] + 1
             best_val_psnr = ckpt.get("extra", {}).get("val_psnr", float("-inf"))
-            print(f"Wznowiono od epoki {start_epoch} | Best PSNR: {best_val_psnr:.2f} dB\n")
+            print(f"Resumed {start_epoch} | Best PSNR: {best_val_psnr:.2f} dB\n")
         elif is_main_process():
-            print("Brak last.pt — trening od początku.")
+            print("No last.pt found — starting training from scratch.")
 
     for epoch in range(start_epoch, epochs + 1):
         if train_sampler is not None:
@@ -68,19 +70,28 @@ def fit(
             print(f"\nEpoch {epoch}/{epochs}")
 
         train_metrics = train_one_epoch(
-            model=model, loader=train_loader, optimizer=optimizer,
-            loss_fn=loss_fn, device=device, epoch=epoch,
-            total_epochs=epochs, show_progress=show_progress,
+            model=model,
+            loader=train_loader,
+            optimizer=optimizer,
+            loss_fn=loss_fn,
+            device=device,
+            epoch=epoch,
+            total_epochs=epochs,
+            show_progress=show_progress,
             grad_clip_max_norm=grad_clip_max_norm,
         )
 
         compute_sam = (epoch % sam_every_n_epochs == 0) or (epoch == epochs)
 
         val_metrics = validate_one_epoch(
-            model=model, loader=val_loader, loss_fn=loss_fn,
-            device=device, num_input_bands=num_input_bands,
+            model=model,
+            loader=val_loader,
+            loss_fn=loss_fn,
+            device=device,
+            num_input_bands=num_input_bands,
             quantization_bits=quantization_bits,
-            epoch=epoch, total_epochs=epochs,
+            epoch=epoch,
+            total_epochs=epochs,
             show_progress=show_progress,
             compute_sam=compute_sam,
         )
@@ -92,7 +103,7 @@ def fit(
             last_sam_deg = val_metrics["sam_deg"]
 
         latent_shape = val_metrics.get("latent_shape")
-        model_raw    = model.module if hasattr(model, "module") else model
+        model_raw = model.module if hasattr(model, "module") else model
 
         cr_proxy = None
         if hasattr(model_raw, "compression_ratio_proxy") and latent_shape:
@@ -102,23 +113,25 @@ def fit(
             )
 
         record = {
-            "epoch":       epoch,
-            "train/loss":  train_metrics["loss"],
-            "train/rmse":  train_metrics["rmse"],
-            "train/psnr":  train_metrics["psnr"],
-            "val/loss":    val_metrics["loss"],
-            "val/rmse":    val_metrics["rmse"],
-            "val/psnr":    val_metrics["psnr"],
-            "val/bpppc":   val_metrics["bpppc"],
+            "epoch": epoch,
+            "train/loss": train_metrics["loss"],
+            "train/rmse": train_metrics["rmse"],
+            "train/psnr": train_metrics["psnr"],
+            "val/loss": val_metrics["loss"],
+            "val/rmse": val_metrics["rmse"],
+            "val/psnr": val_metrics["psnr"],
+            "val/bpppc": val_metrics["bpppc"],
         }
         if last_sam_deg is not None:
             record["val/sam_deg"] = last_sam_deg
         if latent_shape:
-            record.update({
-                "model/latent_c": latent_shape[0],
-                "model/latent_h": latent_shape[1],
-                "model/latent_w": latent_shape[2],
-            })
+            record.update(
+                {
+                    "model/latent_c": latent_shape[0],
+                    "model/latent_h": latent_shape[1],
+                    "model/latent_w": latent_shape[2],
+                }
+            )
         if cr_proxy is not None:
             record["model/cr_proxy"] = cr_proxy
 
@@ -129,7 +142,7 @@ def fit(
 
         if is_main_process():
             sam_str = f"sam={last_sam_deg:.2f}°" if last_sam_deg else ""
-            sam_tag = " ← SAM computed" if compute_sam else ""
+            sam_tag = " - SAM computed" if compute_sam else ""
             print(
                 f"  train={record['train/psnr']:.2f}dB | "
                 f"val={record['val/psnr']:.2f}dB | "
@@ -142,9 +155,13 @@ def fit(
             if _last_save_thread is not None:
                 _last_save_thread.join()
             _last_save_thread = save_last_checkpoint_async(
-                checkpoint_path=checkpoint_path, epoch=epoch,
-                model=model_raw, optimizer=optimizer, config=config,
-                val_metrics=val_metrics, scheduler=scheduler,
+                checkpoint_path=checkpoint_path,
+                epoch=epoch,
+                model=model_raw,
+                optimizer=optimizer,
+                config=config,
+                val_metrics=val_metrics,
+                scheduler=scheduler,
             )
 
             val_psnr = record["val/psnr"]
@@ -152,24 +169,44 @@ def fit(
                 best_val_psnr = val_psnr
                 epochs_without_improvement = 0
                 save_checkpoint(
-                    path=checkpoint_path, epoch=epoch,
-                    model=model_raw, optimizer=optimizer,
-                    config=config, best_val_loss=val_metrics["loss"],
+                    path=checkpoint_path,
+                    epoch=epoch,
+                    model=model_raw,
+                    optimizer=optimizer,
+                    config=config,
+                    best_val_loss=val_metrics["loss"],
                     scheduler=scheduler,
                     extra={
-                        "latent_shape":   latent_shape,
-                        "best_val_psnr":  best_val_psnr,
+                        "latent_shape": latent_shape,
+                        "best_val_psnr": best_val_psnr,
                         "best_val_bpppc": record["val/bpppc"],
-                        "val_sam_deg":    last_sam_deg,
-                        "cr_proxy":       cr_proxy,
+                        "val_sam_deg": last_sam_deg,
+                        "cr_proxy": cr_proxy,
                     },
                 )
                 print(f"New best (PSNR={best_val_psnr:.2f} dB)")
 
                 if logger is not None:
-                    logger.summary["best_val_psnr"]  = best_val_psnr
+                    logger.summary["best_val_psnr"] = best_val_psnr
                     logger.summary["best_val_bpppc"] = record["val/bpppc"]
-                    logger.summary["best_epoch"]     = epoch
+                    logger.summary["best_epoch"] = epoch
+
+                    import wandb
+
+                    artifact = wandb.Artifact(
+                        name=f"model-{logger.id}",
+                        type="model",
+                        metadata={
+                            "epoch": epoch,
+                            "val_psnr": best_val_psnr,
+                            "val_sam_deg": last_sam_deg,
+                            "val_bpppc": record["val/bpppc"],
+                            "cr_proxy": cr_proxy,
+                            "latent_shape": str(latent_shape),
+                        },
+                    )
+                    artifact.add_file(str(checkpoint_path))
+                    logger.log_artifact(artifact, aliases=["best", f"epoch-{epoch}"])
             else:
                 epochs_without_improvement += 1
 

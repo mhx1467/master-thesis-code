@@ -41,7 +41,7 @@ class HSITiffDataset(Dataset):
         if prefer_npy:
             npy_path = self._tif_to_npy_path(self.paths[0])
             if npy_path.exists():
-                sample = np.load(str(npy_path), mmap_mode='r')
+                sample = np.load(str(npy_path), mmap_mode="r")
                 if sample.shape == _NPY_SHAPE_CHW:
                     self._use_npy = True
                     self._npy_is_chw = True
@@ -50,6 +50,7 @@ class HSITiffDataset(Dataset):
                     self._npy_is_chw = False
                 else:
                     import warnings
+
                     warnings.warn(
                         f"Unexpected .npy shape {sample.shape}. Fallback to .TIF.",
                         UserWarning,
@@ -66,9 +67,7 @@ class HSITiffDataset(Dataset):
         else:
             x, valid_mask = self._load_tif(path)
 
-        x_tensor = torch.from_numpy(
-            np.array(x, dtype=np.float32, order='C')
-        )
+        x_tensor = torch.from_numpy(np.array(x, dtype=np.float32, order="C"))
         mask_tensor = torch.from_numpy(valid_mask)
 
         if self.transform is not None:
@@ -78,20 +77,17 @@ class HSITiffDataset(Dataset):
 
         if self.return_mask:
             return {
-                "x":          x_tensor,
+                "x": x_tensor,
                 "valid_mask": mask_tensor,
-                "path":       str(path),
-                "patch_id":   patch_id,
+                "path": str(path),
+                "patch_id": patch_id,
             }
         return x_tensor
 
     def _load_npy(self, tif_path: Path):
         npy_path = self._tif_to_npy_path(tif_path)
         data = np.load(str(npy_path))
-        if self._npy_is_chw:
-            result = data
-        else:
-            result = data.transpose(2, 0, 1)
+        result = data if self._npy_is_chw else data.transpose(2, 0, 1)
 
         valid_mask = np.ones((202, 128, 128), dtype=bool)
         return result, valid_mask
@@ -101,7 +97,7 @@ class HSITiffDataset(Dataset):
         if x.ndim != 3:
             raise ValueError(f"Expected 3D tensor, got {x.shape} for {path}")
 
-        valid_mask = (x != self.nodata_value)
+        valid_mask = x != self.nodata_value
         if self.invalid_channels:
             valid_mask[self.invalid_channels] = False
 
@@ -110,7 +106,7 @@ class HSITiffDataset(Dataset):
 
         if self.drop_invalid_channels and self.invalid_channels:
             keep = [i for i in range(x.shape[0]) if i not in self.invalid_channels]
-            x          = x[keep]
+            x = x[keep]
             valid_mask = valid_mask[keep]
 
         return x, valid_mask
