@@ -4,7 +4,7 @@ experiment:
 
 data:
   difficulty: easy
-  batch_size: 16
+  batch_size: 32
   num_workers: 4
   drop_invalid_channels: true
   train_subset_size: null
