@@ -19,7 +19,7 @@ training:
   early_stopping:
     enabled: true
     patience: 4
-    min_delta: 0.0001
+    psnr_min_delta: 0.0001
 
 model:
   model_name: tiny_ae
