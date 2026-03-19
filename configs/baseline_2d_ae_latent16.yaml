@@ -11,7 +11,7 @@ data:
   val_subset_size: null
 
 training:
-  epochs: 500
+  epochs: 200
   lr: 0.0001
   loss_name: mse
   grad_clip_max_norm: 1.0
@@ -19,7 +19,7 @@ training:
   scheduler:
     enabled: true
     name: cosine
-    T_max: 500
+    T_max: 200
     eta_min: 1.0e-6
   early_stopping:
     enabled: true
