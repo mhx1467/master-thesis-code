@@ -98,10 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--base-url",
         default=os.environ.get("TENSOR_DOCK_API_BASE_URL", DEFAULT_BASE_URL),
-        help=(
-            "API base URL (default: TENSOR_DOCK_API_BASE_URL env var or "
-            f"{DEFAULT_BASE_URL})"
-        ),
+        help=(f"API base URL (default: TENSOR_DOCK_API_BASE_URL env var or {DEFAULT_BASE_URL})"),
     )
     parser.add_argument(
         "--bearer-token",
