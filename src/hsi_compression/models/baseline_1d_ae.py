@@ -13,50 +13,68 @@ class Baseline1DAutoencoder(nn.Module):
         super().__init__()
         self.in_channels = in_channels
 
-        self.encoder_1d = nn.Sequential(
+        import math
+        self._latent_len = math.ceil(math.ceil(in_channels / 2) / 2)
+        self._latent_channels = latent_channels
+
+        self.spectral_encoder = nn.Sequential(
             nn.Conv1d(1, spectral_hidden_channels, kernel_size=5, padding=2),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.MaxPool1d(kernel_size=2),
             nn.Conv1d(spectral_hidden_channels, latent_channels, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool1d(1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.MaxPool1d(kernel_size=2),
         )
 
-        self.decoder_1d = nn.Sequential(
-            nn.ConvTranspose1d(latent_channels, spectral_hidden_channels, kernel_size=in_channels),
-            nn.ReLU(inplace=True),
+        self.spectral_decoder = nn.Sequential(
+            nn.Upsample(scale_factor=2),
+            nn.Conv1d(latent_channels, spectral_hidden_channels, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Upsample(scale_factor=2),
             nn.Conv1d(spectral_hidden_channels, 1, kernel_size=3, padding=1),
+        )
+
+        self.spatial_decoder = nn.Sequential(
+            nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid(),
         )
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         n, c, _, _ = x.shape
-        x_ds = F.avg_pool2d(x, kernel_size=4, stride=4)  # (N, C, 32, 32)
-        n, c, h, w = x_ds.shape
 
-        seq = x_ds.permute(0, 2, 3, 1).contiguous().view(n * h * w, 1, c)
-        z_seq = self.encoder_1d(seq).squeeze(-1)  # (N*H*W, latent_channels)
-        z = z_seq.view(n, h, w, -1).permute(0, 3, 1, 2).contiguous()  # (N, latent, 32, 32)
-        return z
+        x_ds = F.avg_pool2d(x, kernel_size=4, stride=4)   # (N, C, 32, 32)
+        _, _, h, w = x_ds.shape
+
+        seq = x_ds.permute(0, 2, 3, 1).reshape(n * h * w, 1, c)
+        z   = self.spectral_encoder(seq)                   # (N·H·W, lc, 51)
+
+        lc, ll = z.shape[1], z.shape[2]
+        return z.reshape(n, h, w, lc * ll).permute(0, 3, 1, 2).contiguous()
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         n, _, h, w = z.shape
-        z_seq = z.permute(0, 2, 3, 1).contiguous().view(n * h * w, -1, 1)
-        x_seq = self.decoder_1d(z_seq).squeeze(1)  # (N*H*W, C)
+        lc  = self._latent_channels
+        ll  = self._latent_len
 
-        x_ds = x_seq.view(n, h, w, self.in_channels).permute(0, 3, 1, 2).contiguous()
-        x_hat = F.interpolate(x_ds, size=(128, 128), mode="bilinear", align_corners=False)
-        return x_hat
+        z_seq = z.permute(0, 2, 3, 1).reshape(n * h * w, lc, ll)
+        x_seq = self.spectral_decoder(z_seq)               # (N·H·W, 1, 204)
+        x_seq = x_seq[:, 0, :self.in_channels]             # crop → 202
+
+        x_ds = x_seq.reshape(n, h, w, self.in_channels).permute(0, 3, 1, 2).contiguous()
+
+        return self.spatial_decoder(x_ds)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        z = self.encode(x)
+        z     = self.encode(x)
         x_hat = self.decode(z)
-        return {
-            "x_hat": x_hat,
-            "z": z,
-        }
+        return {"x_hat": x_hat, "z": z}
 
     @staticmethod
     def compression_ratio_proxy(
-        input_shape: tuple[int, int, int],
+        input_shape:  tuple[int, int, int],
         latent_shape: tuple[int, int, int],
     ) -> float:
         c, h, w = input_shape
