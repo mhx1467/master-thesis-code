@@ -28,7 +28,7 @@ training:
     enabled: true
     name: cosine
     T_max: 200
-    eta_min: 1.0e-6
+    eta_min: 1.0e-06
   early_stopping:
     enabled: true
     patience: 50
@@ -39,7 +39,10 @@ model:
   model_kwargs:
     in_channels: 202
     latent_channels: 16
-    hidden_channels: [32, 64]
+    hidden_channels:
+    - 32
+    - 64
+    spectral_reduced: 32
 
 logging:
   use_wandb: true

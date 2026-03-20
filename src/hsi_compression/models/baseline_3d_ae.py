@@ -8,57 +8,69 @@ class Baseline3DAutoencoder(nn.Module):
         in_channels: int = 202,
         latent_channels: int = 16,
         hidden_channels: tuple[int, int] = (32, 64),
+        spectral_reduced: int = 32,
     ):
         super().__init__()
-        self.in_channels = in_channels
+        self.in_channels    = in_channels
+        self.spectral_reduced = spectral_reduced
         h1, h2 = hidden_channels
 
-        self.enc1 = nn.Sequential(
-            nn.Conv3d(1,  h1, kernel_size=(5, 3, 3), stride=(2, 1, 1), padding=(2, 1, 1)),
+        self.spectral_encoder_2d = nn.Sequential(
+            nn.Conv2d(in_channels, spectral_reduced * 2, kernel_size=1),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv3d(h1, h1, kernel_size=3, stride=(1, 2, 2), padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-        self.enc2 = nn.Sequential(
-            nn.Conv3d(h1, h2, kernel_size=3, stride=(2, 1, 1), padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv3d(h2, latent_channels, kernel_size=3, stride=(1, 2, 2), padding=1),
+            nn.Conv2d(spectral_reduced * 2, spectral_reduced, kernel_size=1),
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        self.dec1 = nn.Sequential(
-            nn.ConvTranspose3d(
-                latent_channels, h2,
-                kernel_size=3, stride=(1, 2, 2), padding=1, output_padding=(0, 1, 1),
-            ),
+        self.enc3d = nn.Sequential(
+            # (N, 1, 32, 128, 128) → (N, h1, 16, 64, 64)
+            nn.Conv3d(1,  h1, kernel_size=3, stride=(2, 2, 2), padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose3d(
-                h2, h1,
-                kernel_size=3, stride=(2, 1, 1), padding=1, output_padding=(1, 0, 0),
-            ),
+            nn.Conv3d(h1, h1, kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # (N, h1, 16, 64, 64) → (N, lc, 8, 32, 32)
+            nn.Conv3d(h1, latent_channels, kernel_size=3, stride=(2, 2, 2), padding=1),
             nn.LeakyReLU(0.2, inplace=True),
         )
-        self.dec2 = nn.Sequential(
+
+        self.dec3d = nn.Sequential(
+            # (N, lc, 8, 32, 32) → (N, h1, 16, 64, 64)
             nn.ConvTranspose3d(
-                h1, h1,
-                kernel_size=3, stride=(1, 2, 2), padding=1, output_padding=(0, 1, 1),
+                latent_channels, h1,
+                kernel_size=3, stride=(2, 2, 2), padding=1, output_padding=1,
             ),
             nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv3d(h1, h1, kernel_size=3, stride=1, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # (N, h1, 16, 64, 64) → (N, 1, 32, 128, 128)
             nn.ConvTranspose3d(
                 h1, 1,
-                kernel_size=(5, 3, 3), stride=(2, 1, 1), padding=(2, 1, 1), output_padding=(1, 0, 0),
+                kernel_size=3, stride=(2, 2, 2), padding=1, output_padding=1,
             ),
+        )
+
+        self.spectral_decoder_2d = nn.Sequential(
+            nn.Conv2d(spectral_reduced, spectral_reduced * 2, kernel_size=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(spectral_reduced * 2, in_channels, kernel_size=1),
+            nn.Sigmoid(),
         )
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        x3d = x.unsqueeze(1)
-        return self.enc2(self.enc1(x3d))
+        x_s = self.spectral_encoder_2d(x)       # (N, S, 128, 128)
+        x3d = x_s.unsqueeze(1)                  # (N, 1, S, 128, 128)
+        return self.enc3d(x3d)                   # (N, lc, S/4, 32, 32)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        x3d = self.dec2(self.dec1(z))
-        x3d = x3d[:, :, :self.in_channels]
-        x3d = torch.sigmoid(x3d)
-        return x3d.squeeze(1)
+        x3d = self.dec3d(z)                      # (N, 1, S, 128, 128)
+
+        if x3d.shape[2] != self.spectral_reduced:
+            x3d = x3d[:, :, :self.spectral_reduced]
+
+        x_s = x3d.squeeze(1)                    # (N, S, 128, 128)
+        return self.spectral_decoder_2d(x_s)    # (N, 202, 128, 128)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z     = self.encode(x)
