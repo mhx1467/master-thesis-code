@@ -48,6 +48,7 @@ def build_baseline_3d_ae(in_channels: int, **kwargs):
         latent_channels=kwargs.get("latent_channels", 16),
         hidden_channels=tuple(kwargs.get("hidden_channels", (32, 64))),
         spectral_reduced=kwargs.get("spectral_reduced", 32),
+        output_activation=kwargs.get("output_activation", "sigmoid"),
     )
 
 
