@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
 	echo "Usage: $0 <ip> <path_to_ssh_key> [remote_user] [remote_project_dir] [python_version]"
-	echo "Example: $0 203.0.113.10 ~/.ssh/id_gpu brwsx /workspace/hsi 3.10"
+	echo "Example: $0 203.0.113.10 ~/.ssh/id_gpu brwsx /workspace/hsi 3.11"
 	echo "Optional env: SSH_PORT=2222"
 }
 
@@ -51,7 +51,7 @@ fi
 echo "Preparing Python environment on ${REMOTE_USER}@${IP}:${REMOTE_PROJECT_DIR}..."
 
 ssh -i "${PATH_TO_KEY}" -p "${SSH_PORT}" "${REMOTE_USER}@${IP}" \
-	"PROJECT_DIR='${REMOTE_PROJECT_DIR}' REQUESTED_PY='${REQUESTED_PYTHON_VERSION}' bash -se" << 'EOF'
+	"PROJECT_DIR='${REMOTE_PROJECT_DIR}' REQUESTED_PY='${REQUESTED_PYTHON_VERSION}' REPO_URL='${REPO_URL:-}' bash -se" << 'EOF'
 set -euo pipefail
 
 require_cmd() {
@@ -60,29 +60,6 @@ require_cmd() {
 		echo "Missing required command: ${cmd}"
 		exit 1
 	fi
-}
-
-infer_python_from_pyproject() {
-	local pyproject_file="$1"
-
-	if [[ ! -f "${pyproject_file}" ]]; then
-		return 1
-	fi
-
-	local req_line
-	req_line="$(grep -E '^requires-python\s*=\s*"' "${pyproject_file}" || true)"
-	if [[ -z "${req_line}" ]]; then
-		return 1
-	fi
-
-	# Extract the first X.Y from constraints like ">=3.10,<3.13".
-	local inferred
-	inferred="$(printf '%s' "${req_line}" | grep -Eo '[0-9]+\.[0-9]+' | head -n 1 || true)"
-	if [[ -z "${inferred}" ]]; then
-		return 1
-	fi
-
-	printf '%s\n' "${inferred}"
 }
 
 install_python_with_apt() {
@@ -97,17 +74,17 @@ install_python_with_apt() {
 
 	require_cmd apt-get
 	echo "Installing ${apt_py} and venv support..."
-	sudo apt-get update
-	sudo apt-get install -y "${apt_py}" "${apt_py}-venv" || {
+	apt_install update
+	apt_install install -y "${apt_py}" "${apt_py}-venv" || {
 		echo "Direct apt install failed. Attempting deadsnakes PPA fallback..."
-		sudo apt-get install -y software-properties-common
-		sudo add-apt-repository -y ppa:deadsnakes/ppa
-		sudo apt-get update
-		sudo apt-get install -y "${apt_py}" "${apt_py}-venv"
+		apt_install install -y software-properties-common
+		apt_add_repo -y ppa:deadsnakes/ppa
+		apt_install update
+		apt_install install -y "${apt_py}" "${apt_py}-venv"
 	}
 
 	if apt-cache show "${distutils_pkg}" >/dev/null 2>&1; then
-		sudo apt-get install -y "${distutils_pkg}"
+		apt_install install -y "${distutils_pkg}"
 	else
 		echo "Skipping optional package ${distutils_pkg} (not available for ${apt_py})."
 	fi
@@ -115,30 +92,60 @@ install_python_with_apt() {
 
 PROJECT_DIR="${PROJECT_DIR:?PROJECT_DIR not set}"
 REQUESTED_PY="${REQUESTED_PY:-}"
+REPO_URL="${REPO_URL:-}"
+
+as_root() {
+	if [[ "$(id -u)" -eq 0 ]]; then
+		"$@"
+		return
+	fi
+
+	if command -v sudo >/dev/null 2>&1; then
+		sudo "$@"
+		return
+	fi
+
+	echo "Need root privileges to run: $*"
+	exit 1
+}
+
+apt_install() {
+	as_root apt-get "$@"
+}
+
+apt_add_repo() {
+	as_root add-apt-repository "$@"
+}
 
 if [[ ! -d "${PROJECT_DIR}" ]]; then
-	echo "Remote project directory not found: ${PROJECT_DIR}"
-	exit 1
+	echo "Remote project directory not found. Creating: ${PROJECT_DIR}"
+	if ! mkdir -p "${PROJECT_DIR}" 2>/dev/null; then
+		as_root mkdir -p "${PROJECT_DIR}"
+	fi
 fi
 
 cd "${PROJECT_DIR}"
+
+if [[ ! -d .git ]]; then
+	if [[ -z "$(ls -A . 2>/dev/null || true)" ]]; then
+		if [[ -z "${REPO_URL}" ]]; then
+			echo "REPO_URL is required to clone into an empty project directory."
+			exit 1
+		fi
+		require_cmd git
+		echo "Project directory is empty. Cloning repository from ${REPO_URL}..."
+		git clone "${REPO_URL}" .
+	else
+		echo "Project directory exists but is not a git repository. Skipping clone to avoid overwriting files."
+	fi
+fi
 
 if [[ -n "${REQUESTED_PY}" ]]; then
 	PYTHON_VERSION="${REQUESTED_PY}"
 	echo "Using user-requested Python version: ${PYTHON_VERSION}"
 else
-	PYTHON_VERSION="$(infer_python_from_pyproject pyproject.toml || true)"
-	if [[ -z "${PYTHON_VERSION}" ]]; then
-		PYTHON_VERSION="3.10"
-		echo "Could not infer Python version from pyproject.toml. Falling back to ${PYTHON_VERSION}."
-	else
-		echo "Inferred Python version from pyproject.toml: ${PYTHON_VERSION}"
-	fi
-fi
-
-if ! command -v sudo >/dev/null 2>&1; then
-	echo "sudo is required to install Python packages on the VM."
-	exit 1
+	PYTHON_VERSION="3.11"
+	echo "No --python-version provided. Defaulting to Python ${PYTHON_VERSION}."
 fi
 
 install_python_with_apt "${PYTHON_VERSION}"
