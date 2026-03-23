@@ -61,6 +61,7 @@ class HSITiffDataset(Dataset):
 
     def __getitem__(self, idx: int):
         path = self.paths[idx]
+        patch_id = path.stem.replace("-SPECTRAL_IMAGE", "")
 
         if self._use_npy:
             x = self._load_npy(path)
@@ -69,34 +70,54 @@ class HSITiffDataset(Dataset):
             if x.dtype != np.float32 or not x.flags.c_contiguous:
                 x = np.ascontiguousarray(x, dtype=np.float32)
             x_tensor = torch.from_numpy(x)
-            if self.transform is not None:
-                x_tensor = self.transform(x_tensor)
-        else:
-            x, valid_mask = self._load_tif(path)
-            if x.dtype != np.float32 or not x.flags.c_contiguous:
-                x = np.ascontiguousarray(x, dtype=np.float32)
-            if not valid_mask.flags.c_contiguous:
-                valid_mask = np.ascontiguousarray(valid_mask)
-            x_tensor = torch.from_numpy(x)
-            mask_tensor = torch.from_numpy(valid_mask)
+            mask_tensor = self._build_mask_for_npy(x_tensor)
             if self.transform is not None:
                 x_tensor = self.transform(x_tensor, mask_tensor)
-
             if self.return_mask:
-                patch_id = path.stem.replace("-SPECTRAL_IMAGE", "")
                 return {
                     "x": x_tensor,
                     "valid_mask": mask_tensor,
                     "path": str(path),
                     "patch_id": patch_id,
                 }
+            return x_tensor
 
+        x, valid_mask = self._load_tif(path)
+        if x.dtype != np.float32 or not x.flags.c_contiguous:
+            x = np.ascontiguousarray(x, dtype=np.float32)
+        if not valid_mask.flags.c_contiguous:
+            valid_mask = np.ascontiguousarray(valid_mask)
+        x_tensor = torch.from_numpy(x)
+        mask_tensor = torch.from_numpy(valid_mask)
+        if self.transform is not None:
+            x_tensor = self.transform(x_tensor, mask_tensor)
+
+        if self.return_mask:
+            return {
+                "x": x_tensor,
+                "valid_mask": mask_tensor,
+                "path": str(path),
+                "patch_id": patch_id,
+            }
         return x_tensor
+
+    def _build_mask_for_npy(self, x_tensor: torch.Tensor) -> torch.Tensor:
+        mask = torch.ones_like(x_tensor, dtype=torch.bool)
+        if self.invalid_channels:
+            mask[self.invalid_channels] = False
+        if self.drop_invalid_channels and self.invalid_channels:
+            keep = [i for i in range(x_tensor.shape[0]) if i not in self.invalid_channels]
+            x_tensor = x_tensor[keep]
+            mask = mask[keep]
+        return mask
 
     def _load_npy(self, tif_path: Path):
         npy_path = self._tif_to_npy_path(tif_path)
         data = np.load(str(npy_path), mmap_mode="r" if self.npy_mmap else None)
         out = data if self._npy_is_chw else data.transpose(2, 0, 1)
+        if self.drop_invalid_channels and self.invalid_channels:
+            keep = [i for i in range(out.shape[0]) if i not in self.invalid_channels]
+            out = out[keep]
         return out
 
     def _load_tif(self, path: Path):

@@ -1,44 +1,20 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class Baseline3DAutoencoder(nn.Module):
-    """
-    3D Convolutional Autoencoder — joint spectral-spatial compression.
-
-    Architektura dwuetapowa:
-      1. Spectral reduction (Conv2d): 202 → spectral_reduced kanałów
-         Redukuje wymiar spektralny PRZED Conv3d, co daje ~6x mniejszy tensor
-         i znacznie szybszy trening bez utraty joint modeling
-      2. Conv3d encoder/decoder: joint spectral-spatial kompresja
-
-    Przepływ:
-      (N, 202, 128, 128)
-      → spectral_encoder_2d: (N, S, 128, 128)     S = spectral_reduced (32)
-      → unsqueeze: (N, 1, S, 128, 128)
-      → enc3d: (N, lc, S/4, 32, 32)               2× stride=(2,2,2)
-      → dec3d: (N, 1, S, 128, 128)                 odwrotnie
-      → squeeze: (N, S, 128, 128)
-      → spectral_decoder_2d: (N, 202, 128, 128)
-      → Sigmoid
-
-    Latent: (N, latent_channels, S//4, 32, 32)
-    """
-
     def __init__(
         self,
         in_channels: int = 202,
         latent_channels: int = 16,
         hidden_channels: tuple[int, int] = (32, 64),
-        spectral_reduced: int = 32,   # wymiar spektralny dla Conv3d
+        spectral_reduced: int = 32,
     ):
         super().__init__()
-        self.in_channels    = in_channels
+        self.in_channels = in_channels
         self.spectral_reduced = spectral_reduced
         h1, h2 = hidden_channels
 
-        # ── 1. Spectral reduction: Conv2d (szybkie) ───────────────────────
         # (N, 202, 128, 128) → (N, spectral_reduced, 128, 128)
         self.spectral_encoder_2d = nn.Sequential(
             nn.Conv2d(in_channels, spectral_reduced * 2, kernel_size=1),
@@ -47,39 +23,42 @@ class Baseline3DAutoencoder(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        # ── 2. Encoder 3D ────────────────────────────────────────────────
-        # Wejście: (N, 1, spectral_reduced, 128, 128)
+        # Input: (N, 1, spectral_reduced, 128, 128)
         self.enc3d = nn.Sequential(
             # (N, 1, 32, 128, 128) → (N, h1, 16, 64, 64)
-            nn.Conv3d(1,  h1, kernel_size=3, stride=(2, 2, 2), padding=1),
+            nn.Conv3d(1, h1, kernel_size=3, stride=(2, 2, 2), padding=1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv3d(h1, h1, kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-
             # (N, h1, 16, 64, 64) → (N, lc, 8, 32, 32)
             nn.Conv3d(h1, latent_channels, kernel_size=3, stride=(2, 2, 2), padding=1),
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        # ── 3. Decoder 3D ────────────────────────────────────────────────
         self.dec3d = nn.Sequential(
             # (N, lc, 8, 32, 32) → (N, h1, 16, 64, 64)
             nn.ConvTranspose3d(
-                latent_channels, h1,
-                kernel_size=3, stride=(2, 2, 2), padding=1, output_padding=1,
+                latent_channels,
+                h1,
+                kernel_size=3,
+                stride=(2, 2, 2),
+                padding=1,
+                output_padding=1,
             ),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv3d(h1, h1, kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-
             # (N, h1, 16, 64, 64) → (N, 1, 32, 128, 128)
             nn.ConvTranspose3d(
-                h1, 1,
-                kernel_size=3, stride=(2, 2, 2), padding=1, output_padding=1,
+                h1,
+                1,
+                kernel_size=3,
+                stride=(2, 2, 2),
+                padding=1,
+                output_padding=1,
             ),
         )
 
-        # ── 4. Spectral expansion: Conv2d (szybkie) ───────────────────────
         # (N, spectral_reduced, 128, 128) → (N, 202, 128, 128)
         self.spectral_decoder_2d = nn.Sequential(
             nn.Conv2d(spectral_reduced, spectral_reduced * 2, kernel_size=1),
@@ -89,32 +68,31 @@ class Baseline3DAutoencoder(nn.Module):
         )
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        # Spektralna redukcja 2D
-        x_s = self.spectral_encoder_2d(x)       # (N, S, 128, 128)
-        # 3D enkodowanie
-        x3d = x_s.unsqueeze(1)                  # (N, 1, S, 128, 128)
-        return self.enc3d(x3d)                   # (N, lc, S/4, 32, 32)
+        x_s = self.spectral_encoder_2d(x)  # (N, S, 128, 128)
+        # 3D encoding
+        x3d = x_s.unsqueeze(1)  # (N, 1, S, 128, 128)
+        return self.enc3d(x3d)  # (N, lc, S/4, 32, 32)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        # 3D dekodowanie
-        x3d = self.dec3d(z)                      # (N, 1, S, 128, 128)
+        # 3D decoding
+        x3d = self.dec3d(z)  # (N, 1, S, 128, 128)
 
-        # Crop do dokładnie spectral_reduced jeśli potrzeba
+        # Crop or pad spectral dimension if needed
         if x3d.shape[2] != self.spectral_reduced:
-            x3d = x3d[:, :, :self.spectral_reduced]
+            x3d = x3d[:, :, : self.spectral_reduced]
 
-        x_s = x3d.squeeze(1)                    # (N, S, 128, 128)
-        # Spektralna ekspansja 2D
-        return self.spectral_decoder_2d(x_s)    # (N, 202, 128, 128)
+        x_s = x3d.squeeze(1)  # (N, S, 128, 128)
+        # Spectral expansion
+        return self.spectral_decoder_2d(x_s)  # (N, 202, 128, 128)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        z     = self.encode(x)
+        z = self.encode(x)
         x_hat = self.decode(z)
         return {"x_hat": x_hat, "z": z}
 
     @staticmethod
     def compression_ratio_proxy(
-        input_shape:  tuple[int, int, int],
+        input_shape: tuple[int, int, int],
         latent_shape: tuple,
     ) -> float:
         c, h, w = input_shape
