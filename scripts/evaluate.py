@@ -204,7 +204,8 @@ def main():
         difficulty=difficulty,
         normalized=True,
         return_mask=True,
-        drop_invalid_channels=True,
+        drop_invalid_channels=data_section.get("drop_invalid_channels", True),
+        prefer_npy=False,
     )
     if args.subset_size:
         ds = Subset(ds, list(range(min(args.subset_size, len(ds)))))
@@ -220,6 +221,7 @@ def main():
     sample_x = sample_x["x"] if isinstance(sample_x, dict) else sample_x
     num_input_bands = sample_x.shape[0]
     print(f"Input bands: {num_input_bands}")
+    print("Evaluation dataset source: TIF (prefer_npy=False)")
 
     model = build_model(
         model_name=model_name,
