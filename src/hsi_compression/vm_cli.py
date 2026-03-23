@@ -65,6 +65,7 @@ def _load_config(config_path: Path) -> list[dict]:
                 "ssh_key_path": str(key_path),
                 "port": port,
                 "user": str(entry.get("user", os.environ.get("USER", ""))).strip(),
+                "repo_url": str(entry.get("repo_url", "")).strip(),
                 "dataset_path": entry.get("dataset_path"),
                 "remote_project_dir": str(entry.get("remote_project_dir", "/workspace/hsi")),
             }
@@ -88,6 +89,7 @@ def _print_vm(vm: dict) -> None:
     print(f"ssh_key_path: {vm['ssh_key_path']}")
     print(f"dataset_path: {vm['dataset_path'] or '(not set)'}")
     print(f"remote_project_dir: {vm['remote_project_dir']}")
+    print(f"repo_url: {vm['repo_url']}")
 
 
 def _run_shell(cmd: list[str], env: dict[str, str], dry_run: bool) -> int:
@@ -171,6 +173,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             raise ValueError(
                 "Dataset path is required for copy-dataset. Set it in config or pass --dataset-path."
             )
+        if not vm["repo_url"]:
+            raise ValueError("repo_url is required for copy-dataset. Set it in VM config.")
+        env["REPO_URL"] = vm["repo_url"]
         cmd = [
             str(script),
             vm["host"],
@@ -182,6 +187,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     if args.command == "prepare-environment":
         remote_project_dir = args.remote_project_dir or vm["remote_project_dir"]
+        if not vm["repo_url"]:
+            raise ValueError("repo_url is required for prepare-environment. Set it in VM config.")
+        env["REPO_URL"] = vm["repo_url"]
         cmd = [
             str(script),
             vm["host"],

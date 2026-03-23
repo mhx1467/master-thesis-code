@@ -69,8 +69,27 @@ DATASET_SIZE_HUMAN="$(du -sh "${DATASET_SOURCE}" | awk '{print $1}')"
 echo "Dataset size: ${DATASET_SIZE_HUMAN}"
 
 echo "Preparing remote /workspace directory on ${REMOTE_USER}@${IP}..."
-ssh -i "${PATH_TO_KEY}" -p "${SSH_PORT}" "${REMOTE_USER}@${IP}" \
-	"sudo mkdir -p /workspace/data && sudo chmod --recursive 777 /workspace"
+ssh -i "${PATH_TO_KEY}" -p "${SSH_PORT}" "${REMOTE_USER}@${IP}" << 'EOF'
+set -euo pipefail
+
+as_root() {
+	if [[ "$(id -u)" -eq 0 ]]; then
+		"$@"
+		return
+	fi
+
+	if command -v sudo >/dev/null 2>&1; then
+		sudo "$@"
+		return
+	fi
+
+	echo "Need root privileges to run: $*"
+	exit 1
+}
+
+as_root mkdir -p /workspace/data
+as_root chmod --recursive 777 /workspace
+EOF
 
 echo "Syncing dataset directly to ${REMOTE_USER}@${IP}:/workspace/data/..."
 rsync -a --partial --append-verify --info=progress2 -e "ssh -i ${PATH_TO_KEY} -p ${SSH_PORT}" "${DATASET_SOURCE}" "${REMOTE_USER}@${IP}:/workspace/data/"
@@ -79,10 +98,16 @@ echo "Configuring remote repository..."
 ssh -i "${PATH_TO_KEY}" -p "${SSH_PORT}" "${REMOTE_USER}@${IP}" << 'EOF'
 set -euo pipefail
 
+REPO_URL="${REPO_URL:-}"
+
 cd /workspace
 
 if [[ ! -d hsi ]]; then
-	git clone https://github.com/mhx1467/master-thesis-code hsi
+	if [[ -z "${REPO_URL}" ]]; then
+		echo "REPO_URL is required to clone /workspace/hsi when it does not exist."
+		exit 1
+	fi
+	git clone "${REPO_URL}" hsi
 else
 	echo "Repository /workspace/hsi already exists. Skipping clone."
 fi
