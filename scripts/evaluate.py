@@ -74,6 +74,11 @@ def evaluate_model(
     num_batches = 0
     latent_shape = None
 
+    inference_times = []
+    if device.type == "cuda":
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
     progress = tqdm(loader, desc=f"Evaluate [{split_name}]") if show_progress else loader
 
     for batch in progress:
@@ -90,8 +95,17 @@ def evaluate_model(
             enabled=use_amp,
             dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,
         ):
+            if device.type == "cuda":
+                start_event.record()
+
             outputs = model(x)
-            x_hat = outputs["x_hat"]
+
+            if device.type == "cuda":
+                end_event.record()
+                torch.cuda.synchronize()
+                inference_times.append(start_event.elapsed_time(end_event))
+
+            x_hat = outputs["x_hat"].float()
             z = outputs.get("z")
 
         totals["loss"] += (
@@ -143,6 +157,15 @@ def evaluate_model(
     out = {k: v / n for k, v in totals.items()}
     out["latent_shape"] = latent_shape
     out["num_batches"] = num_batches
+
+    # first 5 batches may be outliers due to warmup, so we exclude them if we have enough batches
+    if len(inference_times) > 5:
+        out["inference_ms_per_batch"] = sum(inference_times[5:]) / len(inference_times[5:])
+    elif len(inference_times) > 0:
+        out["inference_ms_per_batch"] = sum(inference_times) / len(inference_times)
+    else:
+        out["inference_ms_per_batch"] = 0.0
+
     return out
 
 
@@ -206,6 +229,8 @@ def main():
 
     load_checkpoint(path=checkpoint_path, model=model, optimizer=None, map_location=device)
 
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
     metrics = evaluate_model(
         model=model,
         loader=loader,
@@ -228,6 +253,7 @@ def main():
     print(f"  Model:      {model_name}")
     print(f"  Split:      {args.split} [{difficulty}]")
     print(f"  Samples:    {len(ds)}")
+    print(f"  Params:     {num_params:,}")
     print(f"{'-' * 55}")
     print(f"  mPSNR:      {metrics['masked_psnr']:.4f} dB")
     print(f"  mSAM:       {metrics['masked_sam_deg']:.4f} °")
@@ -239,6 +265,7 @@ def main():
     print(f"  bpppc:      {metrics['bpppc']:.6f}")
     print(f"  Latent:     {metrics['latent_shape']}")
     print(f"  CR proxy:   {cr_proxy}")
+    print(f"  Infer Time: {metrics['inference_ms_per_batch']:.2f} ms / batch")
     print(f"{'=' * 55}\n")
 
     result = {
@@ -249,6 +276,7 @@ def main():
         "num_samples": len(ds),
         "num_input_bands": num_input_bands,
         "quantization_bits": quant_bits,
+        "num_params": num_params,
         **metrics,
         "compression_ratio_proxy": cr_proxy,
     }
@@ -284,6 +312,7 @@ def main():
                     "eval/mse": metrics["mse"],
                     "eval/invalid_mae": metrics["invalid_mae"],
                     "eval/bpppc": metrics["bpppc"],
+                    "eval/inference_ms_per_batch": metrics["inference_ms_per_batch"],
                 }
             )
 

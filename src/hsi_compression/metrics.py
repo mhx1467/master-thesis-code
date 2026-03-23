@@ -142,10 +142,7 @@ def estimate_bpppc(
     num_bands: int,
     quantization_bits: int = 8,
 ) -> float:
-    n, c, h, w = z.shape[:4]
-    bits = c * h * w * quantization_bits
-    return (
-        bits / float(num_bands * h * 4 * w * 4)
-        if len(z.shape) == 4
-        else bits / float(num_bands * 128 * 128)
-    )
+    elements_per_sample = z[0].numel()
+    bits = elements_per_sample * quantization_bits
+    original_pixels = num_bands * 128 * 128
+    return bits / float(original_pixels)
