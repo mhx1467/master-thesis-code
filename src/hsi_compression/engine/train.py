@@ -66,7 +66,9 @@ def train_one_epoch(
             dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,
         ):
             outputs = model(x)
-            x_hat = outputs["x_hat"]
+            x_hat = outputs[
+                "x_hat"
+            ].float()
             loss = loss_fn(x_hat, x, mask)
 
         if scaler is not None and use_amp:
