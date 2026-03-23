@@ -37,7 +37,6 @@ def main():
     args = parse_args()
 
     cfg = load_config(args.config)
-
     experiment_cfg = cfg.get("experiment", {})
     data_cfg = cfg.get("data", {})
     training_cfg = cfg.get("training", {})
@@ -68,10 +67,12 @@ def main():
     prefetch_factor = data_cfg.get("prefetch_factor", 2)
     train_subset = data_cfg.get("train_subset_size", None)
     val_subset = data_cfg.get("val_subset_size", None)
+    use_amp = training_cfg.get("use_amp", True) and device.type == "cuda"
 
     print(
         f"\nDataset: {difficulty} split | drop_invalid_channels={drop_invalid} | normalization: global min-max [0,1]"
     )
+    print(f"AMP enabled: {use_amp}")
 
     if device.type == "cuda":
         free_bytes, total_bytes = torch.cuda.mem_get_info()
@@ -84,7 +85,7 @@ def main():
         split_name="train",
         difficulty=difficulty,
         normalized=True,
-        return_mask=False,
+        return_mask=True,
         drop_invalid_channels=drop_invalid,
         prefer_npy=prefer_npy,
         npy_mmap=npy_mmap,
@@ -94,7 +95,7 @@ def main():
         split_name="val",
         difficulty=difficulty,
         normalized=True,
-        return_mask=False,
+        return_mask=True,
         drop_invalid_channels=drop_invalid,
         prefer_npy=prefer_npy,
         npy_mmap=npy_mmap,
@@ -106,21 +107,17 @@ def main():
         val_ds = Subset(val_ds, list(range(min(val_subset, len(val_ds)))))
 
     sample = train_ds[0]
-    if isinstance(sample, dict):
-        sample = sample["x"]
-    sample_tensor = sample if isinstance(sample, torch.Tensor) else torch.as_tensor(sample)
+    sample_tensor = sample["x"] if isinstance(sample, dict) else torch.as_tensor(sample)
     num_input_bands = int(sample_tensor.shape[0])
     print(f"Input bands: {num_input_bands} | Train: {len(train_ds)} | Val: {len(val_ds)}")
 
     train_base_ds = train_ds.dataset if isinstance(train_ds, Subset) else train_ds
     val_base_ds = val_ds.dataset if isinstance(val_ds, Subset) else val_ds
-    train_using_npy = bool(getattr(train_base_ds, "using_npy", False))
-    val_using_npy = bool(getattr(val_base_ds, "using_npy", False))
     if hasattr(train_base_ds, "using_npy"):
-        source = ".npy" if train_using_npy else ".TIF"
+        source = ".npy" if bool(getattr(train_base_ds, "using_npy", False)) else ".TIF"
         print(f"Train source: {source} | npy_mmap={npy_mmap}")
     if hasattr(val_base_ds, "using_npy"):
-        source = ".npy" if val_using_npy else ".TIF"
+        source = ".npy" if bool(getattr(val_base_ds, "using_npy", False)) else ".TIF"
         print(f"Val source:   {source} | npy_mmap={npy_mmap}")
 
     debug_loader_timing = data_cfg.get("debug_loader_timing", False)
@@ -144,18 +141,13 @@ def main():
             t0 = time.perf_counter()
             batch = next(iterator)
             t1 = time.perf_counter()
-            if isinstance(batch, dict):
-                x = batch["x"]
-            else:
-                x = batch
-
+            x = batch["x"] if isinstance(batch, dict) else batch
             if device.type == "cuda":
                 s0 = time.perf_counter()
                 _ = x.to(device, non_blocking=True)
                 torch.cuda.synchronize(device)
                 s1 = time.perf_counter()
                 sync_times.append(s1 - s0)
-
             if step >= warmup_batches:
                 load_times.append(t1 - t0)
 
@@ -193,7 +185,6 @@ def main():
     model_kwargs = {
         k: v for k, v in model_cfg.get("model_kwargs", {}).items() if k != "in_channels"
     }
-
     model = build_model(model_name=model_name, in_channels=num_input_bands, **model_kwargs).to(
         device
     )
@@ -209,14 +200,13 @@ def main():
 
     epochs = training_cfg.get("epochs", 500)
     lr = training_cfg.get("lr", 1e-4)
-    loss_name = training_cfg.get("loss_name", "mse")
+    loss_name = training_cfg.get("loss_name", "masked_mse")
     grad_clip = training_cfg.get("grad_clip_max_norm", 1.0)
     quant_bits = training_cfg.get("quantization_bits", 8)
     sam_every = training_cfg.get("sam_every_n_epochs", 10)
     scheduler_cfg = training_cfg.get("scheduler", {})
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
     scheduler = None
     if scheduler_cfg.get("enabled", False):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -235,6 +225,8 @@ def main():
         "num_input_bands": num_input_bands,
         "git_hash": get_git_short_hash(),
         "git_dirty": is_git_dirty(),
+        "model_num_params": n_params,
+        "amp_enabled": use_amp,
     }
 
     def _run(logger=None):
@@ -257,27 +249,16 @@ def main():
             quantization_bits=quant_bits,
             sam_every_n_epochs=sam_every,
             resume=args.resume,
+            use_amp=use_amp,
         )
 
-    result = None
     if use_wandb:
-        with init_wandb(
-            project=logging_cfg.get("project", "hsi-compression"),
-            run_name=args.run_name or exp_name,
-            config=run_cfg,
-        ) as run:
-            result = _run(logger=run)
+        project = logging_cfg.get("project", "hsi-compression-paper")
+        run_name = args.run_name or exp_name
+        with init_wandb(project=project, run_name=run_name, config=run_cfg) as run:
+            _run(logger=run)
     else:
-        result = _run()
-
-    if result is None:
-        raise RuntimeError("Training did not produce results.")
-
-    print(f"\n{'=' * 55}")
-    print("Training completed.")
-    print(f"Best val/loss: {result['best_val_loss']:.6f}")
-    print(f"Best val/psnr: {result['best_val_psnr']:.2f} dB")
-    print(f"Checkpoint:    {ckpt_path}")
+        _run(logger=None)
 
 
 if __name__ == "__main__":

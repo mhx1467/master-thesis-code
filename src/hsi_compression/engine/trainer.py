@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import torch
+
 from hsi_compression.engine.checkpointing import (
     find_resume_checkpoint,
     load_checkpoint,
@@ -30,6 +32,7 @@ def fit(
     quantization_bits: int = 8,
     resume: bool = False,
     sam_every_n_epochs: int = 10,
+    use_amp: bool = True,
 ):
     checkpoint_path = Path(checkpoint_path)
     best_val_loss = float("inf")
@@ -38,6 +41,7 @@ def fit(
     start_epoch = 1
     history = []
     _last_save_thread = None
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
 
     training_cfg = config.get("training", {})
     early_cfg = training_cfg.get("early_stopping", {})
@@ -66,9 +70,15 @@ def fit(
         elif is_main_process():
             print("No last.pt found — starting training from scratch.")
 
+    model_raw = model.module if hasattr(model, "module") else model
+    num_params = sum(p.numel() for p in model_raw.parameters() if p.requires_grad)
+
     for epoch in range(start_epoch, epochs + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
+
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
 
         if is_main_process():
             print(f"\nEpoch {epoch}/{epochs}")
@@ -83,6 +93,8 @@ def fit(
             total_epochs=epochs,
             show_progress=show_progress,
             grad_clip_max_norm=grad_clip_max_norm,
+            scaler=scaler,
+            use_amp=use_amp,
         )
 
         compute_sam = (epoch % sam_every_n_epochs == 0) or (epoch == epochs)
@@ -98,17 +110,16 @@ def fit(
             total_epochs=epochs,
             show_progress=show_progress,
             compute_sam=compute_sam,
+            use_amp=use_amp,
         )
 
         if scheduler is not None:
             scheduler.step()
 
-        if val_metrics["sam_deg"] is not None:
-            last_sam_deg = val_metrics["sam_deg"]
+        if val_metrics["masked_sam_deg"] is not None:
+            last_sam_deg = val_metrics["masked_sam_deg"]
 
         latent_shape = val_metrics.get("latent_shape")
-        model_raw = model.module if hasattr(model, "module") else model
-
         cr_proxy = None
         if hasattr(model_raw, "compression_ratio_proxy") and latent_shape:
             cr_proxy = model_raw.compression_ratio_proxy(
@@ -116,28 +127,44 @@ def fit(
                 latent_shape=latent_shape,
             )
 
+        peak_vram_gb = None
+        if device.type == "cuda":
+            peak_vram_gb = torch.cuda.max_memory_allocated(device) / 1024**3
+
         record = {
             "epoch": epoch,
             "train/loss": train_metrics["loss"],
+            "train/masked_mse": train_metrics["masked_mse"],
+            "train/masked_mae": train_metrics["masked_mae"],
+            "train/masked_psnr": train_metrics["masked_psnr"],
+            "train/masked_sam_deg": train_metrics["masked_sam_deg"],
             "train/mse": train_metrics["mse"],
+            "train/mae": train_metrics["mae"],
             "train/psnr": train_metrics["psnr"],
+            "train/sam_deg": train_metrics["sam_deg"],
+            "train/invalid_mae": train_metrics["invalid_mae"],
+            "train/epoch_time_sec": train_metrics["epoch_time_sec"],
             "val/loss": val_metrics["loss"],
+            "val/masked_mse": val_metrics["masked_mse"],
+            "val/masked_mae": val_metrics["masked_mae"],
+            "val/masked_psnr": val_metrics["masked_psnr"],
+            "val/masked_sam_deg": val_metrics["masked_sam_deg"],
             "val/mse": val_metrics["mse"],
+            "val/mae": val_metrics["mae"],
             "val/psnr": val_metrics["psnr"],
+            "val/sam_deg": val_metrics["sam_deg"],
+            "val/invalid_mae": val_metrics["invalid_mae"],
             "val/bpppc": val_metrics["bpppc"],
+            "val/epoch_time_sec": val_metrics["epoch_time_sec"],
+            "model/num_params": num_params,
         }
-        if last_sam_deg is not None:
-            record["val/sam_deg"] = last_sam_deg
         if latent_shape:
-            record.update(
-                {
-                    "model/latent_c": latent_shape[0],
-                    "model/latent_h": latent_shape[1],
-                    "model/latent_w": latent_shape[2],
-                }
-            )
+            for i, dim in enumerate(latent_shape):
+                record[f"model/latent_dim_{i}"] = dim
         if cr_proxy is not None:
             record["model/cr_proxy"] = cr_proxy
+        if peak_vram_gb is not None:
+            record["system/peak_vram_gb"] = peak_vram_gb
 
         history.append(record)
 
@@ -145,14 +172,14 @@ def fit(
             logger.log(record, step=epoch)
 
         if is_main_process():
-            sam_str = f"sam={last_sam_deg:.2f}°" if last_sam_deg else ""
-            sam_tag = " - SAM computed" if compute_sam else ""
+            masked_sam_val = record["val/masked_sam_deg"]
+            masked_sam_str = f"{masked_sam_val:.2f}°" if masked_sam_val is not None else "n/a"
             print(
-                f"  train={record['train/psnr']:.2f}dB | "
-                f"val={record['val/psnr']:.2f}dB | "
-                f"{sam_str} | "
+                f"  train mPSNR={record['train/masked_psnr']:.2f}dB | "
+                f"val mPSNR={record['val/masked_psnr']:.2f}dB | "
+                f"val PSNR={record['val/psnr']:.2f}dB | "
+                f"val mSAM={masked_sam_str} | "
                 f"bpppc={record['val/bpppc']:.4f}"
-                f"{sam_tag}"
             )
 
         if is_main_process():
@@ -169,7 +196,7 @@ def fit(
             )
 
             val_loss = record["val/loss"]
-            val_psnr = record["val/psnr"]
+            val_psnr = record["val/masked_psnr"]
             if val_psnr > best_val_psnr + early_psnr_min_delta:
                 best_val_loss = val_loss
                 best_val_psnr = val_psnr
@@ -186,15 +213,15 @@ def fit(
                         "latent_shape": latent_shape,
                         "best_val_psnr": best_val_psnr,
                         "best_val_bpppc": record["val/bpppc"],
-                        "val_sam_deg": last_sam_deg,
+                        "val_masked_sam_deg": last_sam_deg,
                         "cr_proxy": cr_proxy,
                     },
                 )
-                print(f"New best PSNR ({best_val_psnr:.2f} dB, loss={best_val_loss:.6f})")
+                print(f"New best masked PSNR ({best_val_psnr:.2f} dB, loss={best_val_loss:.6f})")
 
                 if logger is not None:
                     logger.summary["best_val_loss"] = best_val_loss
-                    logger.summary["best_val_psnr"] = best_val_psnr
+                    logger.summary["best_val_masked_psnr"] = best_val_psnr
                     logger.summary["best_val_bpppc"] = record["val/bpppc"]
                     logger.summary["best_epoch"] = epoch
 
@@ -206,8 +233,8 @@ def fit(
                         metadata={
                             "epoch": epoch,
                             "val_loss": best_val_loss,
-                            "val_psnr": best_val_psnr,
-                            "val_sam_deg": last_sam_deg,
+                            "val_masked_psnr": best_val_psnr,
+                            "val_masked_sam_deg": last_sam_deg,
                             "val_bpppc": record["val/bpppc"],
                             "cr_proxy": cr_proxy,
                             "latent_shape": str(latent_shape),

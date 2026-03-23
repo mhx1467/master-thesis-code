@@ -11,9 +11,10 @@ data:
   drop_invalid_channels: false
 
 training:
+  use_amp: true
   epochs: 20
   lr: 0.0001
-  loss_name: mse
+  loss_name: masked_mse
   debug_reconstruction_stats: true
 
   early_stopping:

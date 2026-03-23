@@ -10,7 +10,7 @@ class MSELoss(nn.Module):
         self,
         x_hat: torch.Tensor,
         x: torch.Tensor,
-        _: torch.Tensor,
+        _: torch.Tensor | None,
     ) -> torch.Tensor:
         return F.mse_loss(x_hat, x)
 
@@ -24,7 +24,7 @@ class RMSELoss(nn.Module):
         self,
         x_hat: torch.Tensor,
         x: torch.Tensor,
-        _: torch.Tensor,
+        _: torch.Tensor | None,
     ) -> torch.Tensor:
         return torch.sqrt(F.mse_loss(x_hat, x) + self.eps)
 

@@ -11,9 +11,10 @@ data:
   val_subset_size: null
 
 training:
+  use_amp: true
   epochs: 200
   lr: 0.0001
-  loss_name: mse
+  loss_name: masked_mse
   grad_clip_max_norm: 1.0
   quantization_bits: 8
   scheduler:

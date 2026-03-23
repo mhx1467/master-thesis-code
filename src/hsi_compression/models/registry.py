@@ -1,7 +1,9 @@
 from hsi_compression.models import (
     Baseline1DAutoencoder,
+    Baseline1DAutoencoderV2,
     Baseline2DAutoencoder,
     Baseline3DAutoencoder,
+    Baseline3DFullBandsAutoencoder,
     TCNHSIAutoencoder,
     TCNHSIAutoencoderV2,
     TinyHSIAutoencoder,
@@ -31,11 +33,30 @@ def build_baseline_1d_ae(in_channels: int, **kwargs):
     )
 
 
+def build_baseline_1d_ae_v2(in_channels: int, **kwargs):
+    return Baseline1DAutoencoderV2(
+        in_channels=in_channels,
+        latent_channels=kwargs.get("latent_channels", 16),
+        spectral_hidden_channels=kwargs.get("spectral_hidden_channels", 64),
+        spatial_stem_channels=tuple(kwargs.get("spatial_stem_channels", (64, 128))),
+    )
+
+
 def build_baseline_3d_ae(in_channels: int, **kwargs):
     return Baseline3DAutoencoder(
         in_channels=in_channels,
         latent_channels=kwargs.get("latent_channels", 16),
         hidden_channels=tuple(kwargs.get("hidden_channels", (32, 64))),
+        spectral_reduced=kwargs.get("spectral_reduced", 32),
+    )
+
+
+def build_baseline_3d_fullbands_ae(in_channels: int, **kwargs):
+    return Baseline3DFullBandsAutoencoder(
+        in_channels=in_channels,
+        latent_channels=kwargs.get("latent_channels", 4),
+        hidden_channels=tuple(kwargs.get("hidden_channels", (8, 16, 32))),
+        output_activation=kwargs.get("output_activation", "sigmoid"),
     )
 
 
@@ -66,8 +87,10 @@ def build_tcn_hsi_ae_v2(in_channels: int, **kwargs):
 MODEL_REGISTRY = {
     "tiny_ae": build_tiny_ae,
     "baseline_1d_ae": build_baseline_1d_ae,
+    "baseline_1d_ae_v2": build_baseline_1d_ae_v2,
     "baseline_2d_ae": build_baseline_2d_ae,
     "baseline_3d_ae": build_baseline_3d_ae,
+    "baseline_3d_fullbands_ae": build_baseline_3d_fullbands_ae,
     "tcn_hsi_ae": build_tcn_hsi_ae,
     "tcn_hsi_ae_v2": build_tcn_hsi_ae_v2,
 }

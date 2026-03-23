@@ -1,11 +1,17 @@
 experiment:
-  name: paper_baseline_2d_ae_latent32
+  name: paper_baseline_3d_fullbands_ae_latent4
   seed: 42
 
 data:
   difficulty: easy
-  batch_size: 32
+  batch_size: 1
   num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  prefer_npy: true
+  npy_mmap: false
+  debug_loader_timing: false
   drop_invalid_channels: true
   train_subset_size: null
   val_subset_size: null
@@ -21,18 +27,22 @@ training:
     enabled: true
     name: cosine
     T_max: 200
-    eta_min: 1.0e-6
+    eta_min: 1.0e-06
   early_stopping:
     enabled: true
-    patience: 50
+    patience: 40
     psnr_min_delta: 0.01
 
 model:
-  model_name: baseline_2d_ae
+  model_name: baseline_3d_fullbands_ae
   model_kwargs:
     in_channels: 202
-    latent_channels: 32
-    hidden_channels: [128, 64]
+    latent_channels: 4
+    hidden_channels:
+    - 8
+    - 16
+    - 32
+    output_activation: sigmoid
 
 logging:
   use_wandb: true
