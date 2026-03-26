@@ -103,12 +103,10 @@ class HSITiffDataset(Dataset):
 
     def _build_mask_for_npy(self, x_tensor: torch.Tensor) -> torch.Tensor:
         mask = torch.ones_like(x_tensor, dtype=torch.bool)
-        if self.invalid_channels:
+
+        if not self.drop_invalid_channels and self.invalid_channels:
             mask[self.invalid_channels] = False
-        if self.drop_invalid_channels and self.invalid_channels:
-            keep = [i for i in range(x_tensor.shape[0]) if i not in self.invalid_channels]
-            x_tensor = x_tensor[keep]
-            mask = mask[keep]
+
         return mask
 
     def _load_npy(self, tif_path: Path):
