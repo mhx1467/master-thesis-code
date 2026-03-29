@@ -16,9 +16,13 @@ dependencies = [
     "python-dotenv",
     "tqdm",
     "pyyaml",
+    "einops",
 ]
 
 [project.optional-dependencies]
+mamba = [
+    "mamba-ssm>=2.3.1",
+]
 dev = [
     "ruff>=0.2.1",
 ]

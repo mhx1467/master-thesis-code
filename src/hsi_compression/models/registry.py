@@ -4,6 +4,7 @@ from hsi_compression.models import (
     Baseline2DAutoencoder,
     Baseline3DAutoencoder,
     Baseline3DFullBandsAutoencoder,
+    SpectralFirstMambaAutoencoder,
     TCNHSIAutoencoder,
     TCNHSIAutoencoderV2,
     TinyHSIAutoencoder,
@@ -61,6 +62,24 @@ def build_baseline_3d_fullbands_ae(in_channels: int, **kwargs):
     )
 
 
+def build_spectral_first_mamba_ae(in_channels: int, **kwargs):
+    return SpectralFirstMambaAutoencoder(
+        in_channels=in_channels,
+        latent_channels=kwargs.get("latent_channels", 8),
+        spectral_d_model=kwargs.get("spectral_d_model", 32),
+        spectral_out_channels=kwargs.get("spectral_out_channels", 64),
+        spatial_embed_channels=kwargs.get("spatial_embed_channels", 16),
+        spatial_context_channels=kwargs.get("spatial_context_channels", 64),
+        num_spectral_blocks=kwargs.get("num_spectral_blocks", 2),
+        mamba_d_state=kwargs.get("mamba_d_state", 16),
+        mamba_d_conv=kwargs.get("mamba_d_conv", 4),
+        mamba_expand=kwargs.get("mamba_expand", 2),
+        use_affine_conditioning=kwargs.get("use_affine_conditioning", False),
+        output_activation=kwargs.get("output_activation", "sigmoid"),
+        dropout=kwargs.get("dropout", 0.0),
+    )
+
+
 def build_tcn_hsi_ae(in_channels: int, **kwargs):
     return TCNHSIAutoencoder(
         in_channels=in_channels,
@@ -92,6 +111,7 @@ MODEL_REGISTRY = {
     "baseline_2d_ae": build_baseline_2d_ae,
     "baseline_3d_ae": build_baseline_3d_ae,
     "baseline_3d_fullbands_ae": build_baseline_3d_fullbands_ae,
+    "spectral_first_mamba_ae": build_spectral_first_mamba_ae,
     "tcn_hsi_ae": build_tcn_hsi_ae,
     "tcn_hsi_ae_v2": build_tcn_hsi_ae_v2,
 }
