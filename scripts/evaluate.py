@@ -35,8 +35,8 @@ def parse_args():
     parser.add_argument("dataset_root", nargs="?", default=None)
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--difficulty", type=str, default=None)
-    parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--subset-size", type=int, default=None)
     parser.add_argument("--quantization-bits", type=int, default=8)
     parser.add_argument("--run-name", type=str, default=None)
@@ -98,7 +98,10 @@ def evaluate_model(
             if device.type == "cuda":
                 start_event.record()
 
-            outputs = model(x)
+            try:
+                outputs = model(x, valid_mask=mask)
+            except TypeError:
+                outputs = model(x)
 
             if device.type == "cuda":
                 end_event.record()
@@ -158,6 +161,7 @@ def evaluate_model(
     out["latent_shape"] = latent_shape
     out["num_batches"] = num_batches
 
+    # first 5 batches may be outliers due to warmup, so we exclude them if we have enough batches
     if len(inference_times) > 5:
         out["inference_ms_per_batch"] = sum(inference_times[5:]) / len(inference_times[5:])
     elif len(inference_times) > 0:
@@ -185,13 +189,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Load checkpoint first and use its config as source of truth
     ckpt_raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     ckpt_config = ckpt_raw.get("config", {})
-    if not ckpt_config:
-        print("Error: checkpoint does not contain config.")
-        sys.exit(1)
-
     model_section = ckpt_config.get("model", {})
     data_section = ckpt_config.get("data", {})
     training_section = ckpt_config.get("training", {})
@@ -202,49 +201,30 @@ def main():
     quant_bits = args.quantization_bits
     use_amp = training_section.get("use_amp", True) and device.type == "cuda"
 
-    batch_size = args.batch_size if args.batch_size is not None else data_section.get("batch_size", 8)
-    num_workers = args.num_workers if args.num_workers is not None else data_section.get("num_workers", 4)
-
-    drop_invalid_channels = data_section.get("drop_invalid_channels", True)
-    prefer_npy = data_section.get("prefer_npy", True)
-    npy_mmap = data_section.get("npy_mmap", False)
-
     ds = build_dataset(
         dataset_root=dataset_root,
         split_name=args.split,
         difficulty=difficulty,
         normalized=True,
         return_mask=True,
-        drop_invalid_channels=drop_invalid_channels,
-        prefer_npy=prefer_npy,
-        npy_mmap=npy_mmap,
+        drop_invalid_channels=data_section.get("drop_invalid_channels", True),
+        prefer_npy=False,
     )
-
     if args.subset_size:
         ds = Subset(ds, list(range(min(args.subset_size, len(ds)))))
 
     loader = build_dataloader(
         ds,
-        batch_size=batch_size,
+        batch_size=args.batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=args.num_workers,
     )
 
-    sample = ds[0]
-    sample_x = sample["x"] if isinstance(sample, dict) else sample
+    sample_x = ds[0] if not args.subset_size else ds.dataset[0]
+    sample_x = sample_x["x"] if isinstance(sample_x, dict) else sample_x
     num_input_bands = sample_x.shape[0]
-
-    print(
-        "Eval config | "
-        f"drop_invalid_channels={drop_invalid_channels} | "
-        f"prefer_npy={prefer_npy} | "
-        f"npy_mmap={npy_mmap}"
-    )
     print(f"Input bands: {num_input_bands}")
-    print(
-        f"Evaluation dataset source: {'NPY' if prefer_npy else 'TIF'} "
-        f"(prefer_npy={prefer_npy})"
-    )
+    print("Evaluation dataset source: TIF (prefer_npy=False)")
 
     model = build_model(
         model_name=model_name,
@@ -302,9 +282,6 @@ def main():
         "num_input_bands": num_input_bands,
         "quantization_bits": quant_bits,
         "num_params": num_params,
-        "drop_invalid_channels": drop_invalid_channels,
-        "prefer_npy": prefer_npy,
-        "npy_mmap": npy_mmap,
         **metrics,
         "compression_ratio_proxy": cr_proxy,
     }
