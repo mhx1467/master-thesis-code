@@ -13,12 +13,12 @@ data:
   npy_mmap: false
   debug_loader_timing: false
   drop_invalid_channels: true
-  train_subset_size: 8
-  val_subset_size: 8
+  train_subset_size: 64
+  val_subset_size: 32
 
 training:
   use_amp: true
-  epochs: 1
+  epochs: 10
   lr: 0.0001
   loss_name: masked_mse
   grad_clip_max_norm: 1.0
@@ -26,7 +26,7 @@ training:
   scheduler:
     enabled: false
     name: cosine
-    T_max: 1
+    T_max: 10
     eta_min: 1.0e-06
   early_stopping:
     enabled: false
@@ -37,17 +37,20 @@ model:
   model_name: pixelwise_spectral_mamba_ae
   model_kwargs:
     in_channels: 202
-    group_size: 4
-    d_model: 128
     latent_channels: 16
-    num_layers: 4
+    group_size: 4
+    d_model: 64
+    mlp_hidden_dim: 256
+    num_mamba_blocks: 4
     mamba_d_state: 16
     mamba_d_conv: 4
     mamba_expand: 2
     pooling: attention
-    refinement_hidden: 16
-    chunk_size: 4096
+    refinement_hidden_channels: 16
+    pixels_per_patch: 1024
+    eval_chunk_size: 8192
     output_activation: sigmoid
+    dropout: 0.0
 
 logging:
   use_wandb: true
