@@ -189,7 +189,8 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         x_bhwc = rearrange(x, 'b c h w -> b (h w) c')
         mask_flat = None
         if valid_mask is not None:
-            mask_flat = rearrange(valid_mask, 'b 1 h w -> b (h w)')
+            pixel_mask = self._collapse_valid_mask(valid_mask, x)
+            mask_flat = rearrange(pixel_mask, 'b 1 h w -> b (h w)')
 
         x_samples = []
         z_samples = []
@@ -288,3 +289,33 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         c, h, w = input_shape
         l, hz, wz = latent_shape
         return (c * h * w) / (l * hz * wz)
+
+    def _collapse_valid_mask(self, valid_mask: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """
+        Convert mask to shape (B, 1, H, W)
+        Supports:
+        - (B, 1, H, W)
+        - (B, C, H, W)
+        """
+        if valid_mask is None:
+            return torch.ones(
+                x.shape[0], 1, x.shape[2], x.shape[3],
+                device=x.device,
+                dtype=torch.bool,
+            )
+
+        if valid_mask.dim() != 4:
+            raise ValueError(f"valid_mask must be 4D, got shape={valid_mask.shape}")
+
+        # already pixel mask
+        if valid_mask.shape[1] == 1:
+            return valid_mask > 0
+
+        # per-band mask → collapse to pixel mask
+        if valid_mask.shape[1] == x.shape[1]:
+            return (valid_mask > 0).all(dim=1, keepdim=True)
+
+        raise ValueError(
+            f"Unexpected valid_mask shape {valid_mask.shape}. "
+            f"Expected channel dim 1 or {x.shape[1]}."
+        )
