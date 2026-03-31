@@ -65,9 +65,14 @@ def train_one_epoch(
             enabled=use_amp,
             dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,
         ):
-            outputs = model(x)
-            x_hat = outputs["x_hat"].float()
-            loss = loss_fn(x_hat, x, mask)
+            try:
+                outputs = model(x, valid_mask=mask)
+            except TypeError:
+                outputs = model(x)
+            x_hat = outputs.get("x_hat_for_loss", outputs["x_hat"]).float()
+            x_target = outputs.get("x_target", x)
+            mask_for_loss = outputs.get("mask_for_loss", mask)
+            loss = loss_fn(x_hat, x_target, mask_for_loss)
 
         if scaler is not None and use_amp:
             scaler.scale(loss).backward()
@@ -84,26 +89,26 @@ def train_one_epoch(
 
         with torch.no_grad():
             masked_mse_val = (
-                masked_mse(x_hat, x, mask) if mask is not None else torch.mean((x_hat - x) ** 2)
+                masked_mse(x_hat, x_target, mask_for_loss) if mask_for_loss is not None else torch.mean((x_hat - x_target) ** 2)
             )
             masked_mae_val = (
-                masked_mae(x_hat, x, mask) if mask is not None else torch.mean((x_hat - x).abs())
+                masked_mae(x_hat, x_target, mask_for_loss) if mask_for_loss is not None else torch.mean((x_hat - x_target).abs())
             )
             masked_psnr_val = (
-                masked_psnr(x_hat, x, mask, data_range=1.0)
-                if mask is not None
-                else psnr(x_hat, x, data_range=1.0)
+                masked_psnr(x_hat, x_target, mask_for_loss, data_range=1.0)
+                if mask_for_loss is not None
+                else psnr(x_hat, x_target, data_range=1.0)
             )
             masked_sam_val = (
-                masked_sam_deg(x_hat, x, mask) if mask is not None else sam_deg(x_hat, x)
+                masked_sam_deg(x_hat, x_target, mask_for_loss) if mask_for_loss is not None else sam_deg(x_hat, x_target)
             )
-            mse_val = torch.mean((x_hat - x) ** 2)
-            mae_val = mae(x_hat, x)
-            psnr_val = psnr(x_hat, x, data_range=1.0)
-            sam_val = sam_deg(x_hat, x)
+            mse_val = torch.mean((x_hat - x_target) ** 2)
+            mae_val = mae(x_hat, x_target)
+            psnr_val = psnr(x_hat, x_target, data_range=1.0)
+            sam_val = sam_deg(x_hat, x_target)
             invalid_mae_val = (
-                invalid_region_mae(x_hat, mask)
-                if mask is not None
+                invalid_region_mae(x_hat, mask_for_loss)
+                if mask_for_loss is not None
                 else torch.tensor(0.0, device=device)
             )
 

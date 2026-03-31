@@ -67,7 +67,10 @@ def validate_one_epoch(
             enabled=use_amp,
             dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,
         ):
-            outputs = model(x)
+            try:
+                outputs = model(x, valid_mask=mask)
+            except TypeError:
+                outputs = model(x)
             x_hat = outputs["x_hat"].float()
             z = outputs.get("z")
             loss_val = loss_fn(x_hat, x, mask)
