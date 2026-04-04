@@ -26,11 +26,11 @@ import tifffile as tiff
 from tqdm import tqdm
 
 WATER_VAPOR_BANDS = list(range(126, 141)) + list(range(160, 167))  # 22 bands
-NODATA_VALUE      = -32768
-CLIP_MIN          = 0.0
-CLIP_MAX          = 10000.0
-EXPECTED_BANDS    = 202
-PATCH_SIZE        = 128
+NODATA_VALUE = -32768
+CLIP_MIN = 0.0
+CLIP_MAX = 10000.0
+EXPECTED_BANDS = 202
+PATCH_SIZE = 128
 EXPECTED_SHAPE_CHW = (EXPECTED_BANDS, PATCH_SIZE, PATCH_SIZE)
 
 
@@ -57,7 +57,7 @@ def convert_one(args: tuple[Path, bool]) -> tuple[Path, str, str]:
             pass
 
     try:
-        raw = tiff.imread(str(tif_path))   # (224, H, W) int16
+        raw = tiff.imread(str(tif_path))  # (224, H, W) int16
 
         if raw.ndim != 3:
             return npy_path, "error", f"unexpected ndim={raw.ndim}, shape={raw.shape}"
@@ -90,22 +90,24 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("dataset_root", type=str,
-                   help="Main dataset directory (contains patches/ subdirectory)")
-    p.add_argument("--workers", type=int, default=8,
-                   help="Number of parallel workers (default: 8)")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Only count files, do not convert")
-    p.add_argument("--force", action="store_true",
-                   help="Overwrite existing .npy files (even correct ones)")
-    p.add_argument("--verify", action="store_true",
-                   help="After conversion, verify random sample of files")
+    p.add_argument(
+        "dataset_root", type=str, help="Main dataset directory (contains patches/ subdirectory)"
+    )
+    p.add_argument("--workers", type=int, default=8, help="Number of parallel workers (default: 8)")
+    p.add_argument("--dry-run", action="store_true", help="Only count files, do not convert")
+    p.add_argument(
+        "--force", action="store_true", help="Overwrite existing .npy files (even correct ones)"
+    )
+    p.add_argument(
+        "--verify", action="store_true", help="After conversion, verify random sample of files"
+    )
     return p.parse_args()
 
 
 def verify_sample(npy_files: list[Path], n: int = 20) -> None:
     """Verifies random sample of converted files."""
     import random
+
     sample = random.sample(npy_files, min(n, len(npy_files)))
     errors = []
     for f in sample:
@@ -149,9 +151,9 @@ def main():
         print(f"Error: no *-SPECTRAL_IMAGE.TIF files in {patches_dir}")
         sys.exit(1)
 
-    existing_npy   = [f for f in tif_files if _npy_path(f).exists()]
-    correct_shape  = 0
-    wrong_shape    = 0
+    existing_npy = [f for f in tif_files if _npy_path(f).exists()]
+    correct_shape = 0
+    wrong_shape = 0
     for f in existing_npy:
         try:
             arr = np.load(str(_npy_path(f)), mmap_mode="r")
@@ -203,11 +205,12 @@ def main():
                 if status == "error":
                     error_list.append((npy_path.name, msg))
                 bar.update(1)
-                bar.set_postfix(conv=counts["converted"], skip=counts["skipped"],
-                                err=counts["error"])
+                bar.set_postfix(
+                    conv=counts["converted"], skip=counts["skipped"], err=counts["error"]
+                )
 
     print()
-    print(f"Done:")
+    print("Done:")
     print(f"  Converted:   {counts['converted']:,}")
     print(f"  Skipped:     {counts['skipped']:,}  (already OK)")
     print(f"  Errors:      {counts['error']:,}")

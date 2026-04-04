@@ -202,11 +202,12 @@ def main():
     lr = training_cfg.get("lr", 1e-4)
     loss_name = training_cfg.get("loss_name", "masked_mse")
     grad_clip = training_cfg.get("grad_clip_max_norm", 1.0)
-    quant_bits = training_cfg.get("quantization_bits", 8)
     sam_every = training_cfg.get("sam_every_n_epochs", 10)
     scheduler_cfg = training_cfg.get("scheduler", {})
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    aux_parameters = [p for n, p in model.named_parameters() if n.endswith(".quantiles")]
+    aux_optimizer = torch.optim.Adam(aux_parameters, lr=1e-3) if aux_parameters else None
     scheduler = None
     if scheduler_cfg.get("enabled", False):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -215,7 +216,15 @@ def main():
             eta_min=scheduler_cfg.get("eta_min", 1e-6),
         )
 
-    loss_fn = build_loss(loss_name)
+    if loss_name == "rate_distortion":
+        rd_lambda = training_cfg.get("rd_lambda", 0.01)
+        distortion_metric = training_cfg.get("distortion_metric", "masked_mse")
+        loss_fn = build_loss(
+            "rate_distortion", lmbda=rd_lambda, distortion_metric=distortion_metric
+        )
+        print(f"Loss: Rate-Distortion (lambda={rd_lambda}, D={distortion_metric})")
+    else:
+        loss_fn = build_loss(loss_name)
     exp_name = experiment_cfg.get("name", "experiment")
     ckpt_path = checkpoints_dir() / f"{exp_name}_best.pt"
 
@@ -236,6 +245,7 @@ def main():
             val_loader=val_loader,
             optimizer=optimizer,
             loss_fn=loss_fn,
+            aux_optimizer=aux_optimizer,
             device=device,
             epochs=epochs,
             checkpoint_path=ckpt_path,
@@ -245,8 +255,6 @@ def main():
             show_progress=True,
             train_sampler=None,
             grad_clip_max_norm=grad_clip,
-            num_input_bands=num_input_bands,
-            quantization_bits=quant_bits,
             sam_every_n_epochs=sam_every,
             resume=args.resume,
             use_amp=use_amp,

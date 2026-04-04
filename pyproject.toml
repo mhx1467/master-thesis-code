@@ -17,6 +17,7 @@ dependencies = [
     "tqdm",
     "pyyaml",
     "einops",
+    "compressai>=1.2.4"
 ]
 
 [project.optional-dependencies]

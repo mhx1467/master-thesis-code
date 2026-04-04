@@ -137,12 +137,61 @@ def masked_sam_deg(
     return masked_sam(x_hat, x, mask, eps=eps) * (180.0 / math.pi)
 
 
-def estimate_bpppc(
-    z: torch.Tensor,
-    num_bands: int,
-    quantization_bits: int = 8,
+def compute_true_bpppc(
+    likelihoods: torch.Tensor, original_shape: tuple[int, int, int, int]
 ) -> float:
-    elements_per_sample = z[0].numel()
-    bits = elements_per_sample * quantization_bits
-    original_pixels = num_bands * 128 * 128
-    return bits / float(original_pixels)
+    N, C, H, W = original_shape
+    num_pixels = N * C * H * W
+
+    bits = torch.log(likelihoods).sum() / -math.log(2.0)
+
+    return (bits / num_pixels).item()
+
+
+def sid(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    # 1. Transform to HWC to operate on spectral vectors (dim=-1)
+    x_hat_p = x_hat.permute(0, 2, 3, 1)
+    x_p = x.permute(0, 2, 3, 1)
+
+    # 3. Protection against NaNs/Infs - if any value is NaN/Inf, the whole SID becomes NaN, which is undesirable.
+    x_hat_pos = torch.clamp(x_hat_p, min=eps)
+    x_pos = torch.clamp(x_p, min=eps)
+
+    # 3. Normalization of each spectral vector to sum to 1 (distributions p and q)
+    p = x_pos / torch.sum(x_pos, dim=-1, keepdim=True)
+    q = x_hat_pos / torch.sum(x_hat_pos, dim=-1, keepdim=True)
+
+    # 4. Calculation of KL divergence D(p||q) and D(q||p) for each pixel, then sum to get SID, and finally average over all pixels.
+    d_pq = torch.sum(p * torch.log(p / q), dim=-1)
+    d_qp = torch.sum(q * torch.log(q / p), dim=-1)
+
+    sid_val = d_pq + d_qp
+
+    return sid_val.mean()
+
+
+def masked_sid(
+    x_hat: torch.Tensor, x: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8
+) -> torch.Tensor:
+    x_hat_p = x_hat.permute(0, 2, 3, 1)
+    x_p = x.permute(0, 2, 3, 1)
+    mask_p = mask.permute(0, 2, 3, 1).bool()
+
+    x_hat_pos = torch.clamp(x_hat_p, min=eps)
+    x_pos = torch.clamp(x_p, min=eps)
+
+    p = x_pos / torch.sum(x_pos, dim=-1, keepdim=True)
+    q = x_hat_pos / torch.sum(x_hat_pos, dim=-1, keepdim=True)
+
+    d_pq = torch.sum(p * torch.log(p / q), dim=-1)
+    d_qp = torch.sum(q * torch.log(q / p), dim=-1)
+
+    sid_val = d_pq + d_qp
+
+    # masking values - if any band is invalid, the whole pixel is invalid; keep masked multiplication for correct SID values
+    pixel_mask = mask_p.any(dim=-1)
+
+    if pixel_mask.sum() == 0:
+        return torch.tensor(float("nan"), device=x.device)
+
+    return sid_val[pixel_mask].mean()

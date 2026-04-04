@@ -4,15 +4,17 @@ import torch
 from tqdm.auto import tqdm
 
 from hsi_compression.metrics import (
-    estimate_bpppc,
+    compute_true_bpppc,
     invalid_region_mae,
     mae,
     masked_mae,
     masked_mse,
     masked_psnr,
     masked_sam_deg,
+    masked_sid,
     psnr,
     sam_deg,
+    sid,
 )
 from hsi_compression.utils.distributed import is_main_process, reduce_mean
 
@@ -23,8 +25,6 @@ def validate_one_epoch(
     loader,
     loss_fn,
     device: torch.device,
-    num_input_bands: int = 202,
-    quantization_bits: int = 8,
     epoch: int | None = None,
     total_epochs: int | None = None,
     show_progress: bool = True,
@@ -38,10 +38,12 @@ def validate_one_epoch(
         "masked_mae": 0.0,
         "masked_psnr": 0.0,
         "masked_sam_deg": 0.0,
+        "masked_sid": 0.0,
         "mse": 0.0,
         "mae": 0.0,
         "psnr": 0.0,
         "sam_deg": 0.0,
+        "sid": 0.0,
         "invalid_mae": 0.0,
         "bpppc": 0.0,
     }
@@ -112,14 +114,21 @@ def validate_one_epoch(
         if compute_sam:
             totals["masked_sam_deg"] += masked_sam_val.item()
             totals["sam_deg"] += sam_val.item()
+            totals["masked_sid"] += (
+                masked_sid(x_hat, x, mask) if mask is not None else sid(x_hat, x)
+            ).item()
+            totals["sid"] += sid(x_hat, x).item()
 
         num_batches += 1
         if z is not None:
             if latent_shape is None:
                 latent_shape = tuple(z.shape[1:])
-            totals["bpppc"] += estimate_bpppc(
-                z, num_bands=num_input_bands, quantization_bits=quantization_bits
-            )
+
+            likelihoods = outputs.get("likelihoods")
+            if likelihoods is not None:
+                totals["bpppc"] += compute_true_bpppc(likelihoods, x.shape)
+            else:
+                raise RuntimeError("Model does not return likelihoods; cannot compute true bpppc.")
 
         if use_progress:
             postfix = {"loss": f"{loss_val.item():.5f}", "mPSNR": f"{masked_psnr_val.item():.2f}dB"}
@@ -131,11 +140,13 @@ def validate_one_epoch(
     out = {
         k: reduce_mean(v / n, device)
         for k, v in totals.items()
-        if k not in {"sam_deg", "masked_sam_deg"} or compute_sam
+        if k not in {"sam_deg", "masked_sam_deg", "sid", "masked_sid"} or compute_sam
     }
     if not compute_sam:
         out["sam_deg"] = None
         out["masked_sam_deg"] = None
+        out["sid"] = None
+        out["masked_sid"] = None
     out["latent_shape"] = latent_shape
     out["epoch_time_sec"] = reduce_mean(time.perf_counter() - start_time, device)
     return out

@@ -1,5 +1,5 @@
 experiment:
-  name: paper_baseline_2d_ae_latent16
+  name: paper_baseline_3d_ae_latent16
   seed: 42
 
 data:
@@ -24,23 +24,26 @@ training:
   lr: 0.0001
   loss_name: masked_mse
   grad_clip_max_norm: 1.0
-  quantization_bits: 8
   scheduler:
     enabled: true
     name: cosine
     T_max: 200
-    eta_min: 1.0e-6
+    eta_min: 1.0e-06
   early_stopping:
     enabled: true
     patience: 50
     psnr_min_delta: 0.01
 
 model:
-  model_name: baseline_2d_ae
+  model_name: baseline_3d_ae
   model_kwargs:
     in_channels: 202
     latent_channels: 16
-    hidden_channels: [128, 64]
+    hidden_channels:
+    - 32
+    - 64
+    spectral_reduced: 32
+    output_activation: sigmoid
 
 logging:
   use_wandb: true

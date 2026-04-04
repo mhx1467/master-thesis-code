@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from compressai.entropy_models import EntropyBottleneck
 
 
 class Baseline1DAutoencoder(nn.Module):
@@ -13,7 +14,8 @@ class Baseline1DAutoencoder(nn.Module):
         super().__init__()
         self.in_channels = in_channels
         self._latent_channels = latent_channels
-        self._latent_len = in_channels // 2 // 2  # 50
+        self._latent_len = in_channels // 2 // 2
+        self.entropy_bottleneck = EntropyBottleneck(latent_channels * self._latent_len)  # 50
 
         self.spectral_encoder = nn.Sequential(
             nn.Conv1d(1, spectral_hidden_channels, kernel_size=5, padding=2),
@@ -72,14 +74,6 @@ class Baseline1DAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
-        x_hat = self.decode(z)
-        return {"x_hat": x_hat, "z": z}
-
-    @staticmethod
-    def compression_ratio_proxy(
-        input_shape: tuple[int, int, int],
-        latent_shape: tuple[int, int, int],
-    ) -> float:
-        c, h, w = input_shape
-        cz, hz, wz = latent_shape
-        return (c * h * w) / (cz * hz * wz)
+        z_hat, likelihoods = self.entropy_bottleneck(z)
+        x_hat = self.decode(z_hat)
+        return {"x_hat": x_hat, "z": z, "z_hat": z_hat, "likelihoods": likelihoods}

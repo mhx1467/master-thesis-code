@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from compressai.entropy_models import EntropyBottleneck
 
 
 class ConvBlock(nn.Module):
@@ -54,6 +55,7 @@ class Baseline2DAutoencoder(nn.Module):
         self.dec_block2 = ConvBlock(h1, h1)
 
         self.out_conv = nn.Conv2d(h1, in_channels, kernel_size=3, padding=1)
+        self.entropy_bottleneck = EntropyBottleneck(latent_channels)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x = self.enc_block1(x)
@@ -73,17 +75,11 @@ class Baseline2DAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
-        x_hat = self.decode(z)
+        z_hat, likelihoods = self.entropy_bottleneck(z)
+        x_hat = self.decode(z_hat)
         return {
             "x_hat": x_hat,
             "z": z,
+            "z_hat": z_hat,
+            "likelihoods": likelihoods,
         }
-
-    @staticmethod
-    def compression_ratio_proxy(
-        input_shape: tuple[int, int, int],
-        latent_shape: tuple[int, int, int],
-    ) -> float:
-        c, h, w = input_shape
-        cz, hz, wz = latent_shape
-        return (c * h * w) / (cz * hz * wz)

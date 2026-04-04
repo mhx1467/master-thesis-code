@@ -28,11 +28,10 @@ def fit(
     show_progress: bool = True,
     train_sampler=None,
     grad_clip_max_norm: float = 1.0,
-    num_input_bands: int = 202,
-    quantization_bits: int = 8,
     resume: bool = False,
     sam_every_n_epochs: int = 10,
     use_amp: bool = True,
+    aux_optimizer=None,
 ):
     checkpoint_path = Path(checkpoint_path)
     best_val_loss = float("inf")
@@ -88,6 +87,7 @@ def fit(
             loader=train_loader,
             optimizer=optimizer,
             loss_fn=loss_fn,
+            aux_optimizer=aux_optimizer,
             device=device,
             epoch=epoch,
             total_epochs=epochs,
@@ -104,8 +104,6 @@ def fit(
             loader=val_loader,
             loss_fn=loss_fn,
             device=device,
-            num_input_bands=num_input_bands,
-            quantization_bits=quantization_bits,
             epoch=epoch,
             total_epochs=epochs,
             show_progress=show_progress,
@@ -120,12 +118,6 @@ def fit(
             last_sam_deg = val_metrics["masked_sam_deg"]
 
         latent_shape = val_metrics.get("latent_shape")
-        cr_proxy = None
-        if hasattr(model_raw, "compression_ratio_proxy") and latent_shape:
-            cr_proxy = model_raw.compression_ratio_proxy(
-                input_shape=(num_input_bands, 128, 128),
-                latent_shape=latent_shape,
-            )
 
         peak_vram_gb = None
         if device.type == "cuda":
@@ -138,10 +130,12 @@ def fit(
             "train/masked_mae": train_metrics["masked_mae"],
             "train/masked_psnr": train_metrics["masked_psnr"],
             "train/masked_sam_deg": train_metrics["masked_sam_deg"],
+            "train/masked_sid": train_metrics.get("masked_sid", 0.0),
             "train/mse": train_metrics["mse"],
             "train/mae": train_metrics["mae"],
             "train/psnr": train_metrics["psnr"],
             "train/sam_deg": train_metrics["sam_deg"],
+            "train/sid": train_metrics.get("sid", 0.0),
             "train/invalid_mae": train_metrics["invalid_mae"],
             "train/epoch_time_sec": train_metrics["epoch_time_sec"],
             "val/loss": val_metrics["loss"],
@@ -149,10 +143,12 @@ def fit(
             "val/masked_mae": val_metrics["masked_mae"],
             "val/masked_psnr": val_metrics["masked_psnr"],
             "val/masked_sam_deg": val_metrics["masked_sam_deg"],
+            "val/masked_sid": val_metrics.get("masked_sid"),
             "val/mse": val_metrics["mse"],
             "val/mae": val_metrics["mae"],
             "val/psnr": val_metrics["psnr"],
             "val/sam_deg": val_metrics["sam_deg"],
+            "val/sid": val_metrics.get("sid"),
             "val/invalid_mae": val_metrics["invalid_mae"],
             "val/bpppc": val_metrics["bpppc"],
             "val/epoch_time_sec": val_metrics["epoch_time_sec"],
@@ -161,8 +157,6 @@ def fit(
         if latent_shape:
             for i, dim in enumerate(latent_shape):
                 record[f"model/latent_dim_{i}"] = dim
-        if cr_proxy is not None:
-            record["model/cr_proxy"] = cr_proxy
         if peak_vram_gb is not None:
             record["system/peak_vram_gb"] = peak_vram_gb
 
@@ -214,7 +208,6 @@ def fit(
                         "best_val_psnr": best_val_psnr,
                         "best_val_bpppc": record["val/bpppc"],
                         "val_masked_sam_deg": last_sam_deg,
-                        "cr_proxy": cr_proxy,
                     },
                 )
                 print(f"New best masked PSNR ({best_val_psnr:.2f} dB, loss={best_val_loss:.6f})")
@@ -236,7 +229,6 @@ def fit(
                             "val_masked_psnr": best_val_psnr,
                             "val_masked_sam_deg": last_sam_deg,
                             "val_bpppc": record["val/bpppc"],
-                            "cr_proxy": cr_proxy,
                             "latent_shape": str(latent_shape),
                         },
                     )

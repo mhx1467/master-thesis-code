@@ -1,53 +1,55 @@
 experiment:
-  name: paper_spectral_first_mamba_ae_latent8
+  name: paper_pixelwise_spectral_mamba_ae_latent16
   seed: 42
 
 data:
   difficulty: easy
   batch_size: 1
-  num_workers: 4
+  num_workers: 2
   pin_memory: true
-  persistent_workers: true
+  persistent_workers: false
   prefetch_factor: 2
   prefer_npy: true
   npy_mmap: false
   debug_loader_timing: false
   drop_invalid_channels: true
-  train_subset_size: null
-  val_subset_size: null
+  train_subset_size: 64
+  val_subset_size: 32
 
 training:
   use_amp: true
-  epochs: 200
+  epochs: 10
   lr: 0.0001
   loss_name: masked_mse
   grad_clip_max_norm: 1.0
-  quantization_bits: 8
   scheduler:
-    enabled: true
+    enabled: false
     name: cosine
-    T_max: 200
+    T_max: 10
     eta_min: 1.0e-06
   early_stopping:
-    enabled: true
-    patience: 40
+    enabled: false
+    patience: 10
     psnr_min_delta: 0.01
 
 model:
-  model_name: spectral_first_mamba_ae
+  model_name: pixelwise_spectral_mamba_ae
   model_kwargs:
     in_channels: 202
-    latent_channels: 8
-    spectral_d_model: 32
-    spectral_out_channels: 64
-    spatial_embed_channels: 16
-    spatial_context_channels: 64
-    num_spectral_blocks: 2
+    latent_channels: 16
+    group_size: 4
+    d_model: 64
+    mlp_hidden_dim: 256
+    num_mamba_blocks: 4
     mamba_d_state: 16
     mamba_d_conv: 4
     mamba_expand: 2
-    use_affine_conditioning: false
+    pooling: attention
+    refinement_hidden_channels: 16
+    pixels_per_patch: 1024
+    eval_chunk_size: 8192
     output_activation: sigmoid
+    dropout: 0.0
 
 logging:
   use_wandb: true

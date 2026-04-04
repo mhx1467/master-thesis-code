@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from compressai.entropy_models import EntropyBottleneck
 from einops import rearrange
 
 from hsi_compression.models.blocks import (
     BidirectionalMambaBlock,
-    QuantizationProxy,
     SpatialConditioning,
     SpatialContextEncoder,
     SpectralAttentionPooling,
@@ -99,7 +99,7 @@ class SpectralFirstMambaAutoencoder(nn.Module):
         self.late_bottleneck = nn.Conv2d(
             spectral_out_channels, latent_channels, kernel_size=1, bias=True
         )
-        self.quantization = QuantizationProxy()
+        self.entropy_bottleneck = EntropyBottleneck(latent_channels)
         self.decoder = SpectralFirstDecoder(
             latent_channels=latent_channels,
             out_channels=in_channels,
@@ -125,8 +125,7 @@ class SpectralFirstMambaAutoencoder(nn.Module):
         _, _, f_joint = self.encode_features(x)
         return self.late_bottleneck(f_joint)
 
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
-        z_q = self.quantization(z)
+    def decode(self, z_q: torch.Tensor) -> torch.Tensor:
         x_pre = self.decoder(z_q)
         x_refined = self.spectral_refinement(x_pre)
         return self.output_activation(x_refined)
@@ -134,7 +133,7 @@ class SpectralFirstMambaAutoencoder(nn.Module):
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         f_spec, f_spat, f_joint = self.encode_features(x)
         z = self.late_bottleneck(f_joint)
-        z_q = self.quantization(z)
+        z_q, likelihoods = self.entropy_bottleneck(z)
         x_pre = self.decoder(z_q)
         x_refined = self.spectral_refinement(x_pre)
         x_hat = self.output_activation(x_refined)
@@ -142,16 +141,8 @@ class SpectralFirstMambaAutoencoder(nn.Module):
             "x_hat": x_hat,
             "z": z,
             "z_q": z_q,
+            "likelihoods": likelihoods,
             "f_spec": f_spec,
             "f_spat": f_spat,
             "f_joint": f_joint,
         }
-
-    @staticmethod
-    def compression_ratio_proxy(
-        input_shape: tuple[int, int, int],
-        latent_shape: tuple[int, int, int],
-    ) -> float:
-        c, h, w = input_shape
-        cz, hz, wz = latent_shape
-        return (c * h * w) / (cz * hz * wz)

@@ -1,5 +1,5 @@
 experiment:
-  name: paper_spectral_first_mamba_ae_latent96
+  name: paper_baseline_3d_fullbands_ae_latent4
   seed: 42
 
 data:
@@ -22,7 +22,6 @@ training:
   lr: 0.0001
   loss_name: masked_mse
   grad_clip_max_norm: 1.0
-  quantization_bits: 8
   scheduler:
     enabled: true
     name: cosine
@@ -34,21 +33,15 @@ training:
     psnr_min_delta: 0.01
 
 model:
-  model_name: spectral_first_mamba_ae
+  model_name: baseline_3d_fullbands_ae
   model_kwargs:
     in_channels: 202
-    latent_channels: 96
-    spectral_d_model: 32
-    spectral_out_channels: 64
-    spatial_embed_channels: 16
-    spatial_context_channels: 64
-    num_spectral_blocks: 2
-    mamba_d_state: 16
-    mamba_d_conv: 4
-    mamba_expand: 2
-    use_affine_conditioning: false
+    latent_channels: 4
+    hidden_channels:
+    - 8
+    - 16
+    - 32
     output_activation: sigmoid
-    dropout: 0.0
 
 logging:
   use_wandb: true

@@ -11,20 +11,24 @@ from tqdm.auto import tqdm
 from hsi_compression.data import build_dataloader, build_dataset
 from hsi_compression.engine.checkpointing import load_checkpoint
 from hsi_compression.metrics import (
-    estimate_bpppc,
+    compute_true_bpppc,
     invalid_region_mae,
     mae,
     masked_mae,
     masked_mse,
     masked_psnr,
     masked_sam_deg,
+    masked_sid,
     psnr,
     sam_deg,
+    sid,
 )
 from hsi_compression.models.registry import build_model
 from hsi_compression.paths import ensure_artifact_dirs, logs_dir
 from hsi_compression.utils import load_project_env
 from hsi_compression.utils.wandb_utils import init_wandb
+
+ORIGINAL_BITS_PER_CHANNEL = 16.0
 
 
 def parse_args():
@@ -38,7 +42,6 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--subset-size", type=int, default=None)
-    parser.add_argument("--quantization-bits", type=int, default=8)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--disable-wandb", action="store_true")
     parser.add_argument("--save-json", action="store_true")
@@ -46,13 +49,20 @@ def parse_args():
     return parser.parse_args()
 
 
+def estimate_compression_ratio_from_bpppc(
+    bpppc: float,
+    original_bits_per_channel: float = ORIGINAL_BITS_PER_CHANNEL,
+) -> float | None:
+    if bpppc <= 0.0:
+        return None
+    return original_bits_per_channel / bpppc
+
+
 @torch.no_grad()
 def evaluate_model(
     model,
     loader,
     device,
-    num_input_bands,
-    quantization_bits,
     show_progress=True,
     split_name="eval",
     use_amp=False,
@@ -64,10 +74,12 @@ def evaluate_model(
         "masked_mae": 0.0,
         "masked_psnr": 0.0,
         "masked_sam_deg": 0.0,
+        "masked_sid": 0.0,
         "mse": 0.0,
         "mae": 0.0,
         "psnr": 0.0,
         "sam_deg": 0.0,
+        "sid": 0.0,
         "invalid_mae": 0.0,
         "bpppc": 0.0,
     }
@@ -108,8 +120,19 @@ def evaluate_model(
                 torch.cuda.synchronize()
                 inference_times.append(start_event.elapsed_time(end_event))
 
-            x_hat = outputs["x_hat"].float()
-            z = outputs.get("z")
+        if not isinstance(outputs, dict):
+            raise RuntimeError(
+                "Model output must be a dict containing at least 'x_hat', 'z', and 'likelihoods'."
+            )
+
+        x_hat = outputs["x_hat"].float()
+        z = outputs.get("z")
+        likelihoods = outputs.get("likelihoods")
+
+        if z is None:
+            raise RuntimeError("Model does not return 'z'; cannot report latent shape or bitrate.")
+        if likelihoods is None:
+            raise RuntimeError("Model does not return 'likelihoods'; cannot compute true bpppc.")
 
         totals["loss"] += (
             masked_mse(x_hat, x, mask).item()
@@ -128,31 +151,34 @@ def evaluate_model(
         totals["masked_sam_deg"] += (
             masked_sam_deg(x_hat, x, mask) if mask is not None else sam_deg(x_hat, x)
         ).item()
+        totals["masked_sid"] += (
+            masked_sid(x_hat, x, mask) if mask is not None else sid(x_hat, x)
+        ).item()
         totals["mse"] += torch.mean((x_hat - x) ** 2).item()
         totals["mae"] += mae(x_hat, x).item()
         totals["psnr"] += psnr(x_hat, x, data_range=1.0).item()
         totals["sam_deg"] += sam_deg(x_hat, x).item()
+        totals["sid"] += sid(x_hat, x).item()
         totals["invalid_mae"] += (
             invalid_region_mae(x_hat, mask)
             if mask is not None
             else torch.tensor(0.0, device=device)
         ).item()
+        totals["bpppc"] += compute_true_bpppc(likelihoods, x.shape)
+
+        if latent_shape is None:
+            latent_shape = tuple(z.shape[1:])
+
         num_batches += 1
 
-        if z is not None:
-            if latent_shape is None:
-                latent_shape = tuple(z.shape[1:])
-            totals["bpppc"] += estimate_bpppc(
-                z,
-                num_bands=num_input_bands,
-                quantization_bits=quantization_bits,
-            )
-
         if show_progress:
+            avg_bpppc = totals["bpppc"] / num_batches
+            avg_cr_est = estimate_compression_ratio_from_bpppc(avg_bpppc)
             progress.set_postfix(
                 {
                     "mPSNR": f"{totals['masked_psnr'] / num_batches:.2f}dB",
-                    "PSNR": f"{totals['psnr'] / num_batches:.2f}dB",
+                    "bpppc": f"{avg_bpppc:.4f}",
+                    "CR(est)": f"{avg_cr_est:.2f}:1" if avg_cr_est is not None else "n/a",
                 }
             )
 
@@ -160,8 +186,9 @@ def evaluate_model(
     out = {k: v / n for k, v in totals.items()}
     out["latent_shape"] = latent_shape
     out["num_batches"] = num_batches
+    out["compression_ratio_est"] = estimate_compression_ratio_from_bpppc(out["bpppc"])
 
-    # first 5 batches may be outliers due to warmup, so we exclude them if we have enough batches
+    # First 5 batches may be outliers due to warmup, so exclude them if enough batches are present.
     if len(inference_times) > 5:
         out["inference_ms_per_batch"] = sum(inference_times[5:]) / len(inference_times[5:])
     elif len(inference_times) > 0:
@@ -185,6 +212,9 @@ def main():
     dataset_root = Path(
         args.dataset_root or os.environ.get("DATASET_ROOT") or "/data/hyspecnet-11k"
     )
+    if not dataset_root.exists():
+        print(f"Error: dataset_root does not exist: {dataset_root}")
+        sys.exit(1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -198,7 +228,6 @@ def main():
     model_name = model_section.get("model_name")
     model_kwargs = model_section.get("model_kwargs", {})
     difficulty = args.difficulty or data_section.get("difficulty", "easy")
-    quant_bits = args.quantization_bits
     use_amp = training_section.get("use_amp", True) and device.type == "cuda"
 
     ds = build_dataset(
@@ -220,11 +249,13 @@ def main():
         num_workers=args.num_workers,
     )
 
-    sample_x = ds[0] if not args.subset_size else ds.dataset[0]
-    sample_x = sample_x["x"] if isinstance(sample_x, dict) else sample_x
+    sample = ds[0] if not args.subset_size else ds.dataset[0]
+    sample_x = sample["x"] if isinstance(sample, dict) else sample
     num_input_bands = sample_x.shape[0]
+
     print(f"Input bands: {num_input_bands}")
     print("Evaluation dataset source: TIF (prefer_npy=False)")
+    print(f"Original bits per channel for CR estimation: {ORIGINAL_BITS_PER_CHANNEL:.0f}")
 
     model = build_model(
         model_name=model_name,
@@ -240,19 +271,10 @@ def main():
         model=model,
         loader=loader,
         device=device,
-        num_input_bands=num_input_bands,
-        quantization_bits=quant_bits,
         show_progress=not args.no_progress,
         split_name=args.split,
         use_amp=use_amp,
     )
-
-    cr_proxy = None
-    if hasattr(model, "compression_ratio_proxy") and metrics["latent_shape"]:
-        cr_proxy = model.compression_ratio_proxy(
-            input_shape=(num_input_bands, 128, 128),
-            latent_shape=metrics["latent_shape"],
-        )
 
     print(f"\n{'=' * 55}")
     print(f"  Model:      {model_name}")
@@ -262,14 +284,20 @@ def main():
     print(f"{'-' * 55}")
     print(f"  mPSNR:      {metrics['masked_psnr']:.4f} dB")
     print(f"  mSAM:       {metrics['masked_sam_deg']:.4f} °")
+    print(f"  mSID:       {metrics['masked_sid']:.6f}")
     print(f"  mMSE:       {metrics['masked_mse']:.6f}")
     print(f"  PSNR:       {metrics['psnr']:.4f} dB")
     print(f"  SAM:        {metrics['sam_deg']:.4f} °")
+    print(f"  SID:        {metrics['sid']:.6f}")
     print(f"  MSE:        {metrics['mse']:.6f}")
     print(f"  invalidMAE: {metrics['invalid_mae']:.6f}")
     print(f"  bpppc:      {metrics['bpppc']:.6f}")
+    print(
+        f"  Est. CR:    {metrics['compression_ratio_est']:.4f}:1"
+        if metrics["compression_ratio_est"] is not None
+        else "  Est. CR:    n/a"
+    )
     print(f"  Latent:     {metrics['latent_shape']}")
-    print(f"  CR proxy:   {cr_proxy}")
     print(f"  Infer Time: {metrics['inference_ms_per_batch']:.2f} ms / batch")
     print(f"{'=' * 55}\n")
 
@@ -280,20 +308,23 @@ def main():
         "model_name": model_name,
         "num_samples": len(ds),
         "num_input_bands": num_input_bands,
-        "quantization_bits": quant_bits,
         "num_params": num_params,
+        "original_bits_per_channel": ORIGINAL_BITS_PER_CHANNEL,
         **metrics,
-        "compression_ratio_proxy": cr_proxy,
     }
 
     if args.save_json:
         out = logs_dir() / f"eval_{model_name}_{difficulty}_{args.split}.json"
-        with open(out, "w") as f:
+        with open(out, "w", encoding="utf-8") as f:
             json.dump(
                 {
-                    k: str(v)
-                    if not isinstance(v, (int, float, str, type(None), list, dict, tuple))
-                    else v
+                    k: (
+                        list(v)
+                        if isinstance(v, tuple)
+                        else str(v)
+                        if not isinstance(v, (int, float, str, type(None), list, dict))
+                        else v
+                    )
                     for k, v in result.items()
                 },
                 f,
@@ -311,12 +342,15 @@ def main():
                 {
                     "eval/masked_psnr": metrics["masked_psnr"],
                     "eval/masked_sam_deg": metrics["masked_sam_deg"],
+                    "eval/masked_sid": metrics["masked_sid"],
                     "eval/masked_mse": metrics["masked_mse"],
                     "eval/psnr": metrics["psnr"],
                     "eval/sam_deg": metrics["sam_deg"],
+                    "eval/sid": metrics["sid"],
                     "eval/mse": metrics["mse"],
                     "eval/invalid_mae": metrics["invalid_mae"],
                     "eval/bpppc": metrics["bpppc"],
+                    "eval/compression_ratio_est": metrics["compression_ratio_est"],
                     "eval/inference_ms_per_batch": metrics["inference_ms_per_batch"],
                 }
             )

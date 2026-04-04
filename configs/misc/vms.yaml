@@ -1,0 +1,19 @@
+# VM definitions used by scripts/vm.py and hsi-vm.
+vms:
+  - name: gpu-tensordock-4090
+    host: 203.0.113.10
+    ssh_key_path: ~/.ssh/id_gpu
+    port: 22
+    user: user
+    repo_url: "https://github.com/mhx1467/master-thesis-code"
+    dataset_path: ~/datasets/hyspecnet-11k
+    remote_project_dir: /workspace/hsi
+
+  - name: vastai
+    host: 115.187.49.98
+    ssh_key_path: ~/.ssh/id_gpu
+    port: 41279
+    user: root
+    repo_url: "https://github.com/mhx1467/master-thesis-code"
+    dataset_path: ~/hsi-compression/pipelines/pull-dataset/hyspectnet-11k
+    remote_project_dir: /workspace/hsi
