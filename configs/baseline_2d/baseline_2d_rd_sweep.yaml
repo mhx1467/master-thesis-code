@@ -4,10 +4,10 @@ experiment:
 
 data:
   difficulty: easy
-  batch_size: 96
-  num_workers: 2
-  pin_memory: true
-  persistent_workers: true
+  batch_size: 64
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
   prefetch_factor: 2
   drop_invalid_channels: true
   train_subset_size: null
