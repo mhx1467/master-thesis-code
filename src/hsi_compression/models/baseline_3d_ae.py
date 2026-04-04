@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from compressai.entropy_models import EntropyBottleneck
 
 
 class Baseline3DAutoencoder(nn.Module):
@@ -66,6 +67,7 @@ class Baseline3DAutoencoder(nn.Module):
         if output_activation == "sigmoid":
             decoder_layers.append(nn.Sigmoid())
         self.spectral_decoder_2d = nn.Sequential(*decoder_layers)
+        self.entropy_bottleneck = EntropyBottleneck(latent_channels * (spectral_reduced // 4))
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x_s = self.spectral_encoder_2d(x)
@@ -86,16 +88,10 @@ class Baseline3DAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
-        x_hat = self.decode(z)
-        return {"x_hat": x_hat, "z": z}
-
-    @staticmethod
-    def compression_ratio_proxy(
-        input_shape: tuple[int, int, int],
-        latent_shape: tuple,
-    ) -> float:
-        c, h, w = input_shape
-        latent_els = 1
-        for s in latent_shape:
-            latent_els *= s
-        return (c * h * w) / latent_els
+        # z is 5D: (N, C, D, H, W). We reshape to 4D for EntropyBottleneck
+        N, C, D, H, W = z.shape
+        z_4d = z.view(N, C * D, H, W)
+        z_hat_4d, likelihoods = self.entropy_bottleneck(z_4d)
+        z_hat = z_hat_4d.view(N, C, D, H, W)
+        x_hat = self.decode(z_hat)
+        return {"x_hat": x_hat, "z": z, "z_hat": z_hat, "likelihoods": likelihoods}

@@ -1,8 +1,10 @@
 import time
 
 import torch
+from compressai.entropy_models import EntropyBottleneck
 from tqdm.auto import tqdm
 
+from hsi_compression.losses import RateDistortionLoss
 from hsi_compression.metrics import (
     invalid_region_mae,
     mae,
@@ -10,8 +12,10 @@ from hsi_compression.metrics import (
     masked_mse,
     masked_psnr,
     masked_sam_deg,
+    masked_sid,
     psnr,
     sam_deg,
+    sid,
 )
 from hsi_compression.utils.distributed import is_main_process, reduce_mean
 
@@ -22,6 +26,7 @@ def train_one_epoch(
     optimizer,
     loss_fn,
     device: torch.device,
+    aux_optimizer=None,
     epoch: int | None = None,
     total_epochs: int | None = None,
     show_progress: bool = True,
@@ -32,14 +37,18 @@ def train_one_epoch(
     model.train()
     totals = {
         "loss": 0.0,
+        "D": 0.0,
+        "R": 0.0,
         "masked_mse": 0.0,
         "masked_mae": 0.0,
         "masked_psnr": 0.0,
         "masked_sam_deg": 0.0,
+        "masked_sid": 0.0,
         "mse": 0.0,
         "mae": 0.0,
         "psnr": 0.0,
         "sam_deg": 0.0,
+        "sid": 0.0,
         "invalid_mae": 0.0,
     }
     num_batches = 0
@@ -72,7 +81,13 @@ def train_one_epoch(
             x_hat = outputs.get("x_hat_for_loss", outputs["x_hat"]).float()
             x_target = outputs.get("x_target", x)
             mask_for_loss = outputs.get("mask_for_loss", mask)
-            loss = loss_fn(x_hat, x_target, mask_for_loss)
+            likelihoods = outputs.get("likelihoods")
+
+            if likelihoods is not None and isinstance(loss_fn, RateDistortionLoss):
+                loss, D, R = loss_fn(x_hat, x_target, mask_for_loss, likelihoods)
+            else:
+                loss = loss_fn(x_hat, x_target, mask_for_loss)
+                D, R = loss, torch.tensor(0.0)
 
         if scaler is not None and use_amp:
             scaler.scale(loss).backward()
@@ -87,12 +102,27 @@ def train_one_epoch(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
             optimizer.step()
 
+        if aux_optimizer is not None:
+            aux_loss = sum(
+                m.loss()
+                for m in model.modules()
+                if hasattr(m, "loss") and isinstance(m, EntropyBottleneck)
+            )
+            if aux_loss != 0 and aux_loss is not None:
+                aux_optimizer.zero_grad()
+                aux_loss.backward()
+                aux_optimizer.step()
+
         with torch.no_grad():
             masked_mse_val = (
-                masked_mse(x_hat, x_target, mask_for_loss) if mask_for_loss is not None else torch.mean((x_hat - x_target) ** 2)
+                masked_mse(x_hat, x_target, mask_for_loss)
+                if mask_for_loss is not None
+                else torch.mean((x_hat - x_target) ** 2)
             )
             masked_mae_val = (
-                masked_mae(x_hat, x_target, mask_for_loss) if mask_for_loss is not None else torch.mean((x_hat - x_target).abs())
+                masked_mae(x_hat, x_target, mask_for_loss)
+                if mask_for_loss is not None
+                else torch.mean((x_hat - x_target).abs())
             )
             masked_psnr_val = (
                 masked_psnr(x_hat, x_target, mask_for_loss, data_range=1.0)
@@ -100,12 +130,20 @@ def train_one_epoch(
                 else psnr(x_hat, x_target, data_range=1.0)
             )
             masked_sam_val = (
-                masked_sam_deg(x_hat, x_target, mask_for_loss) if mask_for_loss is not None else sam_deg(x_hat, x_target)
+                masked_sam_deg(x_hat, x_target, mask_for_loss)
+                if mask_for_loss is not None
+                else sam_deg(x_hat, x_target)
             )
             mse_val = torch.mean((x_hat - x_target) ** 2)
             mae_val = mae(x_hat, x_target)
             psnr_val = psnr(x_hat, x_target, data_range=1.0)
             sam_val = sam_deg(x_hat, x_target)
+            masked_sid_val = (
+                masked_sid(x_hat, x_target, mask_for_loss)
+                if mask_for_loss is not None
+                else sid(x_hat, x_target)
+            )
+            sid_val = sid(x_hat, x_target)
             invalid_mae_val = (
                 invalid_region_mae(x_hat, mask_for_loss)
                 if mask_for_loss is not None
@@ -114,14 +152,18 @@ def train_one_epoch(
 
         metrics = {
             "loss": loss.item(),
+            "D": D.item() if isinstance(D, torch.Tensor) else float(D),
+            "R": R.item() if isinstance(R, torch.Tensor) else float(R),
             "masked_mse": masked_mse_val.item(),
             "masked_mae": masked_mae_val.item(),
             "masked_psnr": masked_psnr_val.item(),
             "masked_sam_deg": masked_sam_val.item(),
+            "masked_sid": masked_sid_val.item(),
             "mse": mse_val.item(),
             "mae": mae_val.item(),
             "psnr": psnr_val.item(),
             "sam_deg": sam_val.item(),
+            "sid": sid_val.item(),
             "invalid_mae": invalid_mae_val.item(),
         }
         for k, v in metrics.items():

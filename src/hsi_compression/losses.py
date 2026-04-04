@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -81,15 +83,46 @@ class MaskedHybridLoss(nn.Module):
         return mse_val + self.alpha * spectral_loss
 
 
+class RateDistortionLoss(nn.Module):
+    def __init__(self, lmbda: float = 0.01, distortion_metric: str = "masked_mse"):
+        super().__init__()
+        self.lmbda = lmbda
+
+        self.distortion_fn = LOSS_REGISTRY.get(distortion_metric, MaskedMSELoss())
+
+    def forward(
+        self,
+        x_hat: torch.Tensor,
+        x: torch.Tensor,
+        mask: torch.Tensor | None,
+        likelihoods: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        D = self.distortion_fn(x_hat, x, mask)
+
+        N, C, H, W = x.shape
+        num_pixels = N * C * H * W
+
+        bits = torch.log(likelihoods).sum() / -math.log(2.0)
+        R = bits / num_pixels
+
+        loss = D + self.lmbda * R
+
+        return loss, D, R
+
+
 LOSS_REGISTRY = {
     "mse": MSELoss(),
     "rmse": RMSELoss(),
     "masked_mse": MaskedMSELoss(),
     "hybrid_mse_sam": MaskedHybridLoss(alpha=0.1),
+    "rate_distortion": RateDistortionLoss,
 }
 
 
-def build_loss(loss_name: str) -> nn.Module:
+def build_loss(loss_name: str, **kwargs) -> nn.Module:
+    if loss_name == "rate_distortion":
+        return RateDistortionLoss(**kwargs)
     if loss_name not in LOSS_REGISTRY:
         raise ValueError(
             f"Unknown loss name: '{loss_name}'. Available: {list(LOSS_REGISTRY.keys())}"

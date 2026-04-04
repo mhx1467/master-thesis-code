@@ -1,38 +1,38 @@
 experiment:
-  name: baseline_2d_ae_latent8
+  name: paper_baseline_2d_ae_latent32
   seed: 42
+
 data:
   difficulty: easy
-  batch_size: 16
+  batch_size: 32
   num_workers: 4
   drop_invalid_channels: true
   train_subset_size: null
   val_subset_size: null
+
 training:
   use_amp: true
   epochs: 200
   lr: 0.0001
   loss_name: masked_mse
   grad_clip_max_norm: 1.0
-  quantization_bits: 8
   scheduler:
     enabled: true
     name: cosine
     T_max: 200
-    eta_min: 1.0e-06
+    eta_min: 1.0e-6
   early_stopping:
     enabled: true
     patience: 50
     psnr_min_delta: 0.01
-  sam_every_n_epochs: 10
+
 model:
   model_name: baseline_2d_ae
   model_kwargs:
     in_channels: 202
-    latent_channels: 8
-    hidden_channels:
-    - 128
-    - 64
+    latent_channels: 32
+    hidden_channels: [128, 64]
+
 logging:
   use_wandb: true
   project: hsi-compression-paper

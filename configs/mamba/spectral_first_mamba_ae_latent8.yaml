@@ -1,19 +1,17 @@
 experiment:
-  name: paper_baseline_3d_ae_latent16
+  name: paper_spectral_first_mamba_ae_latent8
   seed: 42
 
 data:
   difficulty: easy
-  batch_size: 16
+  batch_size: 1
   num_workers: 4
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 2
   prefer_npy: true
   npy_mmap: false
-  debug_loader_timing: true
-  debug_loader_warmup_batches: 4
-  debug_loader_timed_batches: 16
+  debug_loader_timing: false
   drop_invalid_channels: true
   train_subset_size: null
   val_subset_size: null
@@ -24,7 +22,6 @@ training:
   lr: 0.0001
   loss_name: masked_mse
   grad_clip_max_norm: 1.0
-  quantization_bits: 8
   scheduler:
     enabled: true
     name: cosine
@@ -32,18 +29,23 @@ training:
     eta_min: 1.0e-06
   early_stopping:
     enabled: true
-    patience: 50
+    patience: 40
     psnr_min_delta: 0.01
 
 model:
-  model_name: baseline_3d_ae
+  model_name: spectral_first_mamba_ae
   model_kwargs:
     in_channels: 202
-    latent_channels: 16
-    hidden_channels:
-    - 32
-    - 64
-    spectral_reduced: 32
+    latent_channels: 8
+    spectral_d_model: 32
+    spectral_out_channels: 64
+    spatial_embed_channels: 16
+    spatial_context_channels: 64
+    num_spectral_blocks: 2
+    mamba_d_state: 16
+    mamba_d_conv: 4
+    mamba_expand: 2
+    use_affine_conditioning: false
     output_activation: sigmoid
 
 logging:
