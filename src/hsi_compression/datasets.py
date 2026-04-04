@@ -102,20 +102,12 @@ class HSITiffDataset(Dataset):
         return x_tensor
 
     def _build_mask_for_npy(self, x_tensor: torch.Tensor) -> torch.Tensor:
-        mask = torch.ones_like(x_tensor, dtype=torch.bool)
-
-        if not self.drop_invalid_channels and self.invalid_channels:
-            mask[self.invalid_channels] = False
-
-        return mask
+        # HySpecNet benchmark DATA.npy artifacts are already preprocessed to 202 valid bands.
+        return torch.ones_like(x_tensor, dtype=torch.bool)
 
     def _load_npy(self, npy_path: Path):
         data = np.load(str(npy_path), mmap_mode="r" if self.npy_mmap else None)
-        out = data if self._npy_is_chw else data.transpose(2, 0, 1)
-        if self.drop_invalid_channels and self.invalid_channels:
-            keep = [i for i in range(out.shape[0]) if i not in self.invalid_channels]
-            out = out[keep]
-        return out
+        return data if self._npy_is_chw else data.transpose(2, 0, 1)
 
     def _load_tif(self, path: Path):
         x = tiff.imread(str(path))
