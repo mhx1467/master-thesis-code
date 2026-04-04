@@ -1,0 +1,43 @@
+experiment:
+  name: sscnet_2point5bpppc
+  seed: 42
+
+data:
+  difficulty: easy
+  batch_size: 32
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  prefetch_factor: 2
+  drop_invalid_channels: true
+  train_subset_size: null
+  val_subset_size: null
+  prefer_npy: true
+  npy_mmap: true
+
+training:
+  use_amp: true
+  epochs: 200
+  lr: 0.0001
+  loss_name: masked_mse
+  grad_clip_max_norm: 1.0
+  scheduler:
+    enabled: true
+    name: cosine
+    T_max: 200
+    eta_min: 1.0e-6
+  early_stopping:
+    enabled: true
+    patience: 30
+    psnr_min_delta: 0.01
+  sam_every_n_epochs: 10
+
+model:
+  model_name: sscnet
+  model_kwargs:
+    in_channels: 202
+    latent_channels: 1024
+
+logging:
+  use_wandb: true
+  project: hsi-compression-paper

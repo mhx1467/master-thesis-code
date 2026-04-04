@@ -265,9 +265,11 @@ def compute_actual_bpppc_from_strings(
 
 
 def compute_compression_ratio_from_bpppc(
-    bpppc: float,
+    bpppc: float | None,
     original_bits_per_channel: float = 16.0,
 ) -> float | None:
+    if bpppc is None:
+        return None
     if bpppc <= 0.0:
         return None
     return original_bits_per_channel / bpppc
