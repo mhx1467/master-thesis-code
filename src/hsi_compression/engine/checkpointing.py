@@ -64,7 +64,8 @@ def save_last_checkpoint_async(
         checkpoint["extra"] = {
             "val_psnr": val_metrics.get("psnr", 0.0),
             "val_sam_deg": val_metrics.get("sam_deg") or 0.0,
-            "val_bpppc": val_metrics.get("bpppc", 0.0),
+            "val_ref_bpppc": val_metrics.get("ref_bpppc", 0.0),
+            "val_likelihood_bpppc": val_metrics.get("likelihood_bpppc", 0.0),
             "is_last": True,
         }
         tmp = last_path.with_suffix(".tmp")

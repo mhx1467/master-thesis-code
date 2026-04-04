@@ -16,8 +16,8 @@ python scripts/train.py --config configs/baseline_2d/baseline_2d_ae.yaml
 
 Training and evaluation use a single benchmark-aligned HySpecNet-11k pipeline:
 - split files are consumed as published by HySpecNet-11k
-- inputs are loaded from `patches/...-DATA.npy`
-- fallback TIF loading applies the same reference preprocessing: drop invalid bands, clip `0..10000`, normalize to `[0,1]`
+- benchmark train/eval inputs are loaded only from `patches/...-DATA.npy`
+- if you only have `*-SPECTRAL_IMAGE.TIF`, convert them to `*-DATA.npy` before any benchmark run
 
 Evaluation reports:
 - reference metrics for comparison with HySpecNet: `PSNR`, `SSIM`, `SA`, `bpppc`
@@ -41,7 +41,8 @@ After downloading and extracting HySpecNet-11k, point the project to the dataset
       test.csv
 ```
 
-Expected split entries are relative paths to `patches/...-DATA.npy`, exactly as provided by HySpecNet-11k.
+Expected split entries are relative paths inside `patches/`, exactly as provided by HySpecNet-11k, for example
+`TILE/PATCH/PATCH-DATA.npy`.
 
 Set the dataset path:
 

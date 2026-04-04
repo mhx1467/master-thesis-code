@@ -64,6 +64,7 @@ def main():
     training_cfg = cfg.get("training", {})
     model_cfg = cfg.get("model", {})
     logging_cfg = cfg.get("logging", {})
+    seed = experiment_cfg.get("seed", 42)
 
     if args.override_rd_lambda is not None:
         training_cfg["rd_lambda"] = args.override_rd_lambda
@@ -81,7 +82,7 @@ def main():
         print(f"Error: dataset_root does not exist: {dataset_root}")
         sys.exit(1)
 
-    set_seed(experiment_cfg.get("seed", 42))
+    set_seed(seed)
     ensure_artifact_dirs()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -104,6 +105,8 @@ def main():
         f"\nDataset: {difficulty} split | drop_invalid_channels={drop_invalid} | "
         "normalization: reference HySpecNet [clip 0..10000 -> /10000]"
     )
+    if prefer_npy:
+        print("Benchmark input artifact: patches/...-DATA.npy (required)")
     print(f"AMP enabled: {use_amp}")
 
     if device.type == "cuda":
@@ -143,14 +146,7 @@ def main():
     num_input_bands = int(sample_tensor.shape[0])
     print(f"Input bands: {num_input_bands} | Train: {len(train_ds)} | Val: {len(val_ds)}")
 
-    train_base_ds = train_ds.dataset if isinstance(train_ds, Subset) else train_ds
-    val_base_ds = val_ds.dataset if isinstance(val_ds, Subset) else val_ds
-    if hasattr(train_base_ds, "using_npy"):
-        source = ".npy" if bool(getattr(train_base_ds, "using_npy", False)) else ".TIF"
-        print(f"Train source: {source} | npy_mmap={npy_mmap}")
-    if hasattr(val_base_ds, "using_npy"):
-        source = ".npy" if bool(getattr(val_base_ds, "using_npy", False)) else ".TIF"
-        print(f"Val source:   {source} | npy_mmap={npy_mmap}")
+    print(f"Input source: DATA.npy | npy_mmap={npy_mmap}")
 
     debug_loader_timing = data_cfg.get("debug_loader_timing", False)
     if debug_loader_timing:
@@ -165,6 +161,7 @@ def main():
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,
             prefetch_factor=prefetch_factor,
+            seed=seed,
         )
         iterator = iter(timing_loader)
         load_times = []
@@ -202,6 +199,7 @@ def main():
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
+        seed=seed,
     )
     val_loader = build_dataloader(
         val_ds,
@@ -211,6 +209,7 @@ def main():
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
+        seed=seed,
     )
 
     model_name = model_cfg.get("model_name")
@@ -220,6 +219,12 @@ def main():
     model = build_model(model_name=model_name, in_channels=num_input_bands, **model_kwargs).to(
         device
     )
+
+    if getattr(model, "pixels_per_patch", None) is not None:
+        print(
+            "Warning: pixel subsampling is enabled for this model and changes the training objective. "
+            "Use only for exploratory runs, not benchmark claims."
+        )
 
     if args.pretrained:
         pretrained_path = Path(args.pretrained)

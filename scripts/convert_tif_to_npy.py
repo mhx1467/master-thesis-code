@@ -39,6 +39,31 @@ def _npy_path(tif_path: Path) -> Path:
     return tif_path.parent / f"{stem}-DATA.npy"
 
 
+def _preprocess_tif(tif_path: Path) -> np.ndarray:
+    raw = tiff.imread(str(tif_path))  # (224, H, W) int16
+
+    if raw.ndim != 3:
+        raise ValueError(f"unexpected ndim={raw.ndim}, shape={raw.shape}")
+
+    x = raw.astype(np.float32)
+    x[x == NODATA_VALUE] = 0.0
+
+    keep = [i for i in range(x.shape[0]) if i not in WATER_VAPOR_BANDS]
+    x = x[keep]  # (202, H, W)
+
+    if x.shape[0] != EXPECTED_BANDS:
+        raise ValueError(f"unexpected band count after drop: {x.shape[0]}")
+
+    x = np.clip(x, CLIP_MIN, CLIP_MAX)
+    x = (x - CLIP_MIN) / (CLIP_MAX - CLIP_MIN)
+
+    x = np.ascontiguousarray(x, dtype=np.float32)
+    if x.shape != EXPECTED_SHAPE_CHW:
+        raise ValueError(f"shape mismatch: {x.shape}")
+
+    return x
+
+
 def convert_one(args: tuple[Path, bool]) -> tuple[Path, str, str]:
     """
     Converts one TIF → NPY file.
@@ -48,35 +73,20 @@ def convert_one(args: tuple[Path, bool]) -> tuple[Path, str, str]:
     tif_path, force = args
     npy_path = _npy_path(tif_path)
 
-    if not force and npy_path.exists():
-        try:
-            existing = np.load(str(npy_path), mmap_mode="r")
-            if existing.shape == EXPECTED_SHAPE_CHW:
-                return npy_path, "skipped", ""
-        except Exception:
-            pass
-
     try:
-        raw = tiff.imread(str(tif_path))  # (224, H, W) int16
+        x = _preprocess_tif(tif_path)
 
-        if raw.ndim != 3:
-            return npy_path, "error", f"unexpected ndim={raw.ndim}, shape={raw.shape}"
-
-        x = raw.astype(np.float32)
-
-        x[x == NODATA_VALUE] = 0.0
-
-        keep = [i for i in range(x.shape[0]) if i not in WATER_VAPOR_BANDS]
-        x = x[keep]  # (202, H, W)
-
-        if x.shape[0] != EXPECTED_BANDS:
-            return npy_path, "error", f"unexpected band count after drop: {x.shape[0]}"
-
-        x = np.clip(x, CLIP_MIN, CLIP_MAX)
-        x = (x - CLIP_MIN) / (CLIP_MAX - CLIP_MIN)
-
-        x = np.ascontiguousarray(x, dtype=np.float32)
-        assert x.shape == EXPECTED_SHAPE_CHW, f"shape mismatch: {x.shape}"
+        if not force and npy_path.exists():
+            try:
+                existing = np.load(str(npy_path), mmap_mode="r")
+                if (
+                    existing.shape == EXPECTED_SHAPE_CHW
+                    and existing.dtype == np.float32
+                    and np.array_equal(existing, x)
+                ):
+                    return npy_path, "skipped", ""
+            except Exception:
+                pass
 
         np.save(str(npy_path), x)
         return npy_path, "converted", ""
@@ -157,14 +167,14 @@ def main():
     for f in existing_npy:
         try:
             arr = np.load(str(_npy_path(f)), mmap_mode="r")
-            if arr.shape == EXPECTED_SHAPE_CHW:
+            if arr.shape == EXPECTED_SHAPE_CHW and arr.dtype == np.float32:
                 correct_shape += 1
             else:
                 wrong_shape += 1
         except Exception:
             wrong_shape += 1
 
-    to_convert = len(tif_files) - (correct_shape if not args.force else 0)
+    to_convert = len(tif_files)
     size_per_file_mb = EXPECTED_BANDS * PATCH_SIZE * PATCH_SIZE * 4 / 1024 / 1024
     total_gb = len(tif_files) * size_per_file_mb / 1024
 
@@ -173,23 +183,19 @@ def main():
     print("=" * 55)
     print(f"  Directory:           {patches_dir}")
     print(f"  TIF files:           {len(tif_files):,}")
-    print(f"  Already converted:   {correct_shape:,}  (shape {EXPECTED_SHAPE_CHW} ✓)")
+    print(f"  Existing candidates: {correct_shape:,}  (shape {EXPECTED_SHAPE_CHW}, dtype float32)")
     if wrong_shape:
         print(f"  Wrong shape/error:   {wrong_shape:,}  (will be recalculated)")
-    print(f"  To convert:          {to_convert:,}")
+    print(f"  To verify/convert:   {to_convert:,}")
     print(f"  Required space:      ~{total_gb:.1f} GB")
     print(f"  Output format:       {EXPECTED_SHAPE_CHW} float32 [0.0, 1.0]")
     print(f"  Workers:             {args.workers}")
     print()
 
     if args.dry_run:
-        print("Dry-run mode — no changes.")
-        return
-
-    if to_convert == 0:
-        print("All files already converted to correct format.")
-        if args.verify:
-            verify_sample([_npy_path(f) for f in tif_files])
+        print(
+            "Dry-run mode — no changes. Existing DATA.npy files are not trusted without TIF parity check."
+        )
         return
 
     job_args = [(f, args.force) for f in tif_files]

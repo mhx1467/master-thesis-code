@@ -14,6 +14,7 @@ class Baseline3DAutoencoder(nn.Module):
     ):
         super().__init__()
         self.in_channels = in_channels
+        self.latent_channels = latent_channels
         self.spectral_reduced = spectral_reduced
         self.output_activation = output_activation
         h1, h2 = hidden_channels
@@ -116,3 +117,14 @@ class Baseline3DAutoencoder(nn.Module):
         z_hat = z_hat_4d.view(z_shape)
         x_hat = self.decode(z_hat)
         return {"x_hat": x_hat, "z_hat": z_hat}
+
+    @property
+    def bpppc(self) -> float:
+        latent_h = 32
+        latent_w = 32
+        input_h = 128
+        input_w = 128
+        latent_d = self.spectral_reduced // 4
+        return (self.latent_channels * latent_d * latent_h * latent_w) / (
+            self.in_channels * input_h * input_w
+        )
