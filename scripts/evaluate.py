@@ -69,6 +69,9 @@ def _call_model_compress(model, x, mask):
 
 
 def _call_model_decompress(model, packed, mask):
+    if "latent" in packed:
+        return model.decompress(latent=packed["latent"], z_shape=packed.get("z_shape"))
+
     kwargs = {
         "strings": packed["strings"],
         "shape": packed["shape"],
@@ -83,6 +86,8 @@ def _call_model_decompress(model, packed, mask):
 def _validate_packed_output(packed: dict):
     if not isinstance(packed, dict):
         raise RuntimeError("model.compress() must return a dict")
+    if "latent" in packed:
+        return
     if "strings" not in packed:
         raise RuntimeError("model.compress() output must contain 'strings'")
     if "shape" not in packed:
@@ -133,6 +138,8 @@ def evaluate_model(
     }
     num_batches = 0
     latent_shape = None
+    has_likelihoods = False
+    actual_available = False
 
     inference_times = []
     if device.type == "cuda":
@@ -166,18 +173,11 @@ def evaluate_model(
                 inference_times.append(start_event.elapsed_time(end_event))
 
         if not isinstance(outputs, dict):
-            raise RuntimeError(
-                "Model output must be a dict containing at least 'x_hat', 'z', and 'likelihoods'."
-            )
+            raise RuntimeError("Model output must be a dict containing at least 'x_hat'.")
 
         x_hat = outputs["x_hat"].float()
         z = outputs.get("z")
         likelihoods = outputs.get("likelihoods")
-
-        if z is None:
-            raise RuntimeError("Model does not return 'z'; cannot report latent shape or bitrate.")
-        if likelihoods is None:
-            raise RuntimeError("Model does not return 'likelihoods'; cannot compute true bpppc.")
 
         totals["loss"] += (
             masked_mse(x_hat, x, mask).item()
@@ -212,88 +212,104 @@ def evaluate_model(
             if mask is not None
             else torch.tensor(0.0, device=device)
         ).item()
-        totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
+        if likelihoods is not None:
+            has_likelihoods = True
+            totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
         model_ref_bpppc = getattr(
             model.module if hasattr(model, "module") else model, "bpppc", None
         )
         if model_ref_bpppc is not None:
             totals["ref_bpppc"] += float(model_ref_bpppc)
 
-        if latent_shape is None:
+        if latent_shape is None and z is not None:
             latent_shape = tuple(z.shape[1:])
 
-        packed = _call_model_compress(model, x, mask)
-        _validate_packed_output(packed)
-        decoded = _call_model_decompress(model, packed, mask)
+        supports_actual = bool(
+            getattr(
+                model.module if hasattr(model, "module") else model,
+                "supports_actual_compression",
+                True,
+            )
+        )
+        if supports_actual:
+            packed = _call_model_compress(model, x, mask)
+            _validate_packed_output(packed)
+            decoded = _call_model_decompress(model, packed, mask)
 
-        if not isinstance(decoded, dict) or "x_hat" not in decoded:
-            raise RuntimeError("model.decompress() must return a dict containing 'x_hat'")
+            if not isinstance(decoded, dict) or "x_hat" not in decoded:
+                raise RuntimeError("model.decompress() must return a dict containing 'x_hat'")
 
-        x_hat_actual = decoded["x_hat"].float()
+            x_hat_actual = decoded["x_hat"].float()
+            actual_available = True
 
-        totals["actual_masked_mse"] += (
-            masked_mse(x_hat_actual, x, mask)
-            if mask is not None
-            else torch.mean((x_hat_actual - x) ** 2)
-        ).item()
-        totals["actual_masked_mae"] += (
-            masked_mae(x_hat_actual, x, mask)
-            if mask is not None
-            else torch.mean((x_hat_actual - x).abs())
-        ).item()
-        totals["actual_masked_psnr"] += (
-            masked_psnr(x_hat_actual, x, mask, data_range=1.0)
-            if mask is not None
-            else psnr(x_hat_actual, x)
-        ).item()
-        totals["actual_psnr"] += psnr(x_hat_actual, x, data_range=1.0).item()
+            totals["actual_masked_mse"] += (
+                masked_mse(x_hat_actual, x, mask)
+                if mask is not None
+                else torch.mean((x_hat_actual - x) ** 2)
+            ).item()
+            totals["actual_masked_mae"] += (
+                masked_mae(x_hat_actual, x, mask)
+                if mask is not None
+                else torch.mean((x_hat_actual - x).abs())
+            ).item()
+            totals["actual_masked_psnr"] += (
+                masked_psnr(x_hat_actual, x, mask, data_range=1.0)
+                if mask is not None
+                else psnr(x_hat_actual, x)
+            ).item()
+            totals["actual_psnr"] += psnr(x_hat_actual, x, data_range=1.0).item()
 
-        totals["actual_masked_sam_deg"] += (
-            masked_sam_deg(x_hat_actual, x, mask) if mask is not None else sam_deg(x_hat_actual, x)
-        ).item()
-        totals["actual_masked_sid"] += (
-            masked_sid(x_hat_actual, x, mask) if mask is not None else sid(x_hat_actual, x)
-        ).item()
-        totals["actual_mse"] += torch.mean((x_hat_actual - x) ** 2).item()
-        totals["actual_mae"] += mae(x_hat_actual, x).item()
+            totals["actual_masked_sam_deg"] += (
+                masked_sam_deg(x_hat_actual, x, mask)
+                if mask is not None
+                else sam_deg(x_hat_actual, x)
+            ).item()
+            totals["actual_masked_sid"] += (
+                masked_sid(x_hat_actual, x, mask) if mask is not None else sid(x_hat_actual, x)
+            ).item()
+            totals["actual_mse"] += torch.mean((x_hat_actual - x) ** 2).item()
+            totals["actual_mae"] += mae(x_hat_actual, x).item()
 
-        with torch.no_grad():
-            B, C, H, W = x.shape
+            with torch.no_grad():
+                B, C, H, W = x.shape
 
-            x_ssim = x.view(B * C, 1, H, W)
-            x_hat_ssim = x_hat_actual.view(B * C, 1, H, W)
+                x_ssim = x.view(B * C, 1, H, W)
+                x_hat_ssim = x_hat_actual.view(B * C, 1, H, W)
 
-            _, ssim_map = tm_ssim(x_hat_ssim, x_ssim, data_range=1.0, return_full_image=True)
+                _, ssim_map = tm_ssim(x_hat_ssim, x_ssim, data_range=1.0, return_full_image=True)
 
-            if mask is not None:
-                mask_expanded = mask.expand(-1, C, -1, -1) if mask.shape[1] == 1 else mask
+                if mask is not None:
+                    mask_expanded = mask.expand(-1, C, -1, -1) if mask.shape[1] == 1 else mask
 
-                mask_ssim = mask_expanded.reshape(B * C, 1, H, W).bool()
+                    mask_ssim = mask_expanded.reshape(B * C, 1, H, W).bool()
 
-                if ssim_map.shape == mask_ssim.shape:
-                    valid_ssim_values = ssim_map[mask_ssim]
-                    if valid_ssim_values.numel() > 0:
-                        batch_masked_ssim = valid_ssim_values.mean().item()
+                    if ssim_map.shape == mask_ssim.shape:
+                        valid_ssim_values = ssim_map[mask_ssim]
+                        if valid_ssim_values.numel() > 0:
+                            batch_masked_ssim = valid_ssim_values.mean().item()
+                        else:
+                            batch_masked_ssim = 0.0
                     else:
-                        batch_masked_ssim = 0.0
+                        batch_masked_ssim = ssim_map.mean().item()
                 else:
                     batch_masked_ssim = ssim_map.mean().item()
-            else:
-                batch_masked_ssim = ssim_map.mean().item()
 
-        totals["actual_ssim"] = totals.get("actual_ssim", 0.0) + batch_masked_ssim
-        totals["actual_sam_deg"] += sam_deg(x_hat_actual, x).item()
-        totals["actual_sid"] += sid(x_hat_actual, x).item()
-        totals["actual_invalid_mae"] += (
-            invalid_region_mae(x_hat_actual, mask)
-            if mask is not None
-            else torch.tensor(0.0, device=device)
-        ).item()
-        totals["actual_bpppc"] += compute_actual_bpppc_from_strings(packed["strings"], x.shape)
+            totals["actual_ssim"] = totals.get("actual_ssim", 0.0) + batch_masked_ssim
+            totals["actual_sam_deg"] += sam_deg(x_hat_actual, x).item()
+            totals["actual_sid"] += sid(x_hat_actual, x).item()
+            totals["actual_invalid_mae"] += (
+                invalid_region_mae(x_hat_actual, mask)
+                if mask is not None
+                else torch.tensor(0.0, device=device)
+            ).item()
+            if "strings" in packed:
+                totals["actual_bpppc"] += compute_actual_bpppc_from_strings(
+                    packed["strings"], x.shape
+                )
 
         num_batches += 1
 
-        if show_progress:
+        if show_progress and actual_available:
             avg_actual_bpppc = totals["actual_bpppc"] / num_batches
             avg_actual_cr = compute_compression_ratio_from_bpppc(
                 avg_actual_bpppc, ORIGINAL_BITS_PER_CHANNEL
@@ -311,6 +327,25 @@ def evaluate_model(
     out["actual_ssim"] = totals["actual_ssim"] / n
     out["latent_shape"] = latent_shape
     out["num_batches"] = num_batches
+    if not has_likelihoods:
+        out["likelihood_bpppc"] = None
+    if not actual_available:
+        for key in (
+            "actual_masked_mse",
+            "actual_masked_mae",
+            "actual_masked_psnr",
+            "actual_masked_sam_deg",
+            "actual_masked_sid",
+            "actual_mse",
+            "actual_mae",
+            "actual_psnr",
+            "actual_sam_deg",
+            "actual_sid",
+            "actual_invalid_mae",
+            "actual_bpppc",
+            "actual_ssim",
+        ):
+            out[key] = None
     out["ref_compression_ratio"] = compute_compression_ratio_from_bpppc(
         out["ref_bpppc"], ORIGINAL_BITS_PER_CHANNEL
     )
@@ -400,16 +435,8 @@ def main():
 
     load_checkpoint(path=checkpoint_path, model=model, optimizer=None, map_location=device)
 
-    if not hasattr(model, "update"):
-        raise RuntimeError(
-            f"Model '{model_name}' does not implement update(); actual compression is unavailable."
-        )
-    model.update(force=True)
-
-    if not hasattr(model, "compress") or not hasattr(model, "decompress"):
-        raise RuntimeError(
-            f"Model '{model_name}' must implement compress() and decompress() for actual CR."
-        )
+    if hasattr(model, "update"):
+        model.update(force=True)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -443,18 +470,46 @@ def main():
     print(f"  mPSNR:        {metrics['masked_psnr']:.4f} dB")
     print(f"  mSAM:         {metrics['masked_sam_deg']:.4f} °")
     print(f"  mSID:         {metrics['masked_sid']:.6f}")
-    print(f"  likel. bpppc: {metrics['likelihood_bpppc']:.6f}")
+    print(
+        f"  likel. bpppc: {metrics['likelihood_bpppc']:.6f}"
+        if metrics["likelihood_bpppc"] is not None
+        else "  likel. bpppc: n/a"
+    )
     print(
         f"  Likel. CR:    {metrics['likelihood_compression_ratio']:.4f}:1"
         if metrics["likelihood_compression_ratio"] is not None
         else "  Likel. CR:    n/a"
     )
-    print(f"  actual mPSNR: {metrics['actual_masked_psnr']:.4f} dB")
-    print(f"  actual mSSIM: {metrics['actual_ssim']:.4f}")
-    print(f"  actual mSAM:  {metrics['actual_masked_sam_deg']:.4f} °")
-    print(f"  actual mSID:  {metrics['actual_masked_sid']:.6f}")
-    print(f"  actual mMAE:  {metrics['actual_masked_mae']:.6f}")
-    print(f"  Actual bpppc: {metrics['actual_bpppc']:.6f}")
+    print(
+        f"  actual mPSNR: {metrics['actual_masked_psnr']:.4f} dB"
+        if metrics["actual_masked_psnr"] is not None
+        else "  actual mPSNR: n/a"
+    )
+    print(
+        f"  actual mSSIM: {metrics['actual_ssim']:.4f}"
+        if metrics["actual_ssim"] is not None
+        else "  actual mSSIM: n/a"
+    )
+    print(
+        f"  actual mSAM:  {metrics['actual_masked_sam_deg']:.4f} °"
+        if metrics["actual_masked_sam_deg"] is not None
+        else "  actual mSAM:  n/a"
+    )
+    print(
+        f"  actual mSID:  {metrics['actual_masked_sid']:.6f}"
+        if metrics["actual_masked_sid"] is not None
+        else "  actual mSID:  n/a"
+    )
+    print(
+        f"  actual mMAE:  {metrics['actual_masked_mae']:.6f}"
+        if metrics["actual_masked_mae"] is not None
+        else "  actual mMAE:  n/a"
+    )
+    print(
+        f"  Actual bpppc: {metrics['actual_bpppc']:.6f}"
+        if metrics["actual_bpppc"] is not None
+        else "  Actual bpppc: n/a"
+    )
     print(
         f"  Actual CR:    {metrics['actual_compression_ratio']:.4f}:1"
         if metrics["actual_compression_ratio"] is not None
@@ -497,44 +552,43 @@ def main():
         print(f"Saved: {out}")
 
     if not args.disable_wandb:
+        log_payload = {
+            "eval/ref_psnr": metrics["psnr"],
+            "eval/ref_ssim": metrics["ssim"],
+            "eval/ref_sa_deg": metrics["sam_deg"],
+            "eval/ref_bpppc": metrics["ref_bpppc"],
+            "eval/ref_compression_ratio": metrics["ref_compression_ratio"],
+            "eval/likelihood_bpppc": metrics["likelihood_bpppc"],
+            "eval/likelihood_compression_ratio": metrics["likelihood_compression_ratio"],
+            "eval/masked_psnr": metrics["masked_psnr"],
+            "eval/masked_sam_deg": metrics["masked_sam_deg"],
+            "eval/masked_sid": metrics["masked_sid"],
+            "eval/masked_mse": metrics["masked_mse"],
+            "eval/psnr": metrics["psnr"],
+            "eval/sam_deg": metrics["sam_deg"],
+            "eval/sid": metrics["sid"],
+            "eval/mse": metrics["mse"],
+            "eval/invalid_mae": metrics["invalid_mae"],
+            "eval/actual_ssim": metrics["actual_ssim"],
+            "eval/actual_masked_psnr": metrics["actual_masked_psnr"],
+            "eval/actual_masked_sam_deg": metrics["actual_masked_sam_deg"],
+            "eval/actual_masked_sid": metrics["actual_masked_sid"],
+            "eval/actual_masked_mse": metrics["actual_masked_mse"],
+            "eval/actual_psnr": metrics["actual_psnr"],
+            "eval/actual_sam_deg": metrics["actual_sam_deg"],
+            "eval/actual_sid": metrics["actual_sid"],
+            "eval/actual_mse": metrics["actual_mse"],
+            "eval/actual_invalid_mae": metrics["actual_invalid_mae"],
+            "eval/actual_bpppc": metrics["actual_bpppc"],
+            "eval/actual_compression_ratio": metrics["actual_compression_ratio"],
+            "eval/inference_ms_per_batch": metrics["inference_ms_per_batch"],
+        }
         with init_wandb(
             project="hsi-compression-paper",
             run_name=args.run_name or f"eval_{model_name}_{args.split}",
             config=result,
         ) as run:
-            run.log(
-                {
-                    "eval/ref_psnr": metrics["psnr"],
-                    "eval/ref_ssim": metrics["ssim"],
-                    "eval/ref_sa_deg": metrics["sam_deg"],
-                    "eval/ref_bpppc": metrics["ref_bpppc"],
-                    "eval/ref_compression_ratio": metrics["ref_compression_ratio"],
-                    "eval/likelihood_bpppc": metrics["likelihood_bpppc"],
-                    "eval/likelihood_compression_ratio": metrics["likelihood_compression_ratio"],
-                    "eval/masked_psnr": metrics["masked_psnr"],
-                    "eval/masked_sam_deg": metrics["masked_sam_deg"],
-                    "eval/masked_sid": metrics["masked_sid"],
-                    "eval/masked_mse": metrics["masked_mse"],
-                    "eval/psnr": metrics["psnr"],
-                    "eval/sam_deg": metrics["sam_deg"],
-                    "eval/sid": metrics["sid"],
-                    "eval/mse": metrics["mse"],
-                    "eval/invalid_mae": metrics["invalid_mae"],
-                    "eval/actual_ssim": metrics["actual_ssim"],
-                    "eval/actual_masked_psnr": metrics["actual_masked_psnr"],
-                    "eval/actual_masked_sam_deg": metrics["actual_masked_sam_deg"],
-                    "eval/actual_masked_sid": metrics["actual_masked_sid"],
-                    "eval/actual_masked_mse": metrics["actual_masked_mse"],
-                    "eval/actual_psnr": metrics["actual_psnr"],
-                    "eval/actual_sam_deg": metrics["actual_sam_deg"],
-                    "eval/actual_sid": metrics["actual_sid"],
-                    "eval/actual_mse": metrics["actual_mse"],
-                    "eval/actual_invalid_mae": metrics["actual_invalid_mae"],
-                    "eval/actual_bpppc": metrics["actual_bpppc"],
-                    "eval/actual_compression_ratio": metrics["actual_compression_ratio"],
-                    "eval/inference_ms_per_batch": metrics["inference_ms_per_batch"],
-                }
-            )
+            run.log({k: v for k, v in log_payload.items() if v is not None})
 
 
 if __name__ == "__main__":

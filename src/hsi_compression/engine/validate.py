@@ -53,6 +53,7 @@ def validate_one_epoch(
     }
     num_batches = 0
     latent_shape = None
+    has_likelihoods = False
     start_time = time.perf_counter()
 
     use_progress = show_progress and is_main_process()
@@ -138,9 +139,8 @@ def validate_one_epoch(
                 latent_shape = tuple(z.shape[1:])
 
             if likelihoods is not None:
+                has_likelihoods = True
                 totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
-            else:
-                raise RuntimeError("Model does not return likelihoods; cannot compute true bpppc.")
 
         model_ref_bpppc = getattr(
             model.module if hasattr(model, "module") else model, "bpppc", None
@@ -165,6 +165,8 @@ def validate_one_epoch(
         out["masked_sam_deg"] = None
         out["sid"] = None
         out["masked_sid"] = None
+    if not has_likelihoods:
+        out["likelihood_bpppc"] = None
     out["latent_shape"] = latent_shape
     out["epoch_time_sec"] = reduce_mean(time.perf_counter() - start_time, device)
     return out

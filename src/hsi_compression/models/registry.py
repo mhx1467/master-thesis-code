@@ -4,6 +4,7 @@ from hsi_compression.models import (
     Baseline3DAutoencoder,
     PixelwiseSpectralMambaAutoencoder,
     SpectralFirstMambaAutoencoderV2,
+    SSCNet,
 )
 
 
@@ -77,11 +78,19 @@ def build_pixelwise_spectral_mamba_ae(in_channels: int, **kwargs):
     )
 
 
+def build_sscnet(in_channels: int, **kwargs):
+    return SSCNet(
+        in_channels=in_channels,
+        latent_channels=kwargs.get("latent_channels", 1024),
+    )
+
+
 MODEL_REGISTRY = {
     "pixelwise_spectral_mamba_ae": build_pixelwise_spectral_mamba_ae,
     "baseline_1d_ae_v2": build_baseline_1d_ae_v2,
     "baseline_2d_ae": build_baseline_2d_ae,
     "baseline_3d_ae": build_baseline_3d_ae,
+    "sscnet": build_sscnet,
     "spectral_first_mamba_ae_v2": build_spectral_first_mamba_ae_v2,
 }
 
