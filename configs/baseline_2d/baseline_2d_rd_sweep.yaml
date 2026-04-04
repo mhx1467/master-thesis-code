@@ -4,14 +4,16 @@ experiment:
 
 data:
   difficulty: easy
-  batch_size: 64
-  num_workers: 0
-  pin_memory: false
+  batch_size: 128
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
   drop_invalid_channels: true
   train_subset_size: null
   val_subset_size: null
   prefer_npy: true
-  npy_mmap: false
+  npy_mmap: true
 
 training:
   use_amp: true
