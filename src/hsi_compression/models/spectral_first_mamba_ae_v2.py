@@ -308,6 +308,26 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         x_pix = self.spectral_refinement(x_pix)
         return rearrange(x_pix, "(b h w) c -> b c h w", b=b, h=h, w=w)
 
+    def encode(self, x: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
+        mask_float = valid_mask.float() if valid_mask is not None else None
+        gamma, beta = self.spatial_condition(x, mask=mask_float)
+        x_low = F.avg_pool2d(x, kernel_size=4, stride=4)
+        mask_low = None
+        if mask_float is not None:
+            mask_low = F.max_pool2d(mask_float, kernel_size=4, stride=4)
+        spec_feat, _ = self._spectral_encode_grid(x_low, mask=mask_low)
+        fused = spec_feat * (1.0 + gamma)
+        if beta is not None:
+            fused = fused + beta
+        z = self.encoder_to_latent(fused)
+        return z
+
+    def decode(self, z_hat: torch.Tensor) -> torch.Tensor:
+        x_hat = self.decoder(z_hat)
+        x_hat = self._refine_output(x_hat)
+        x_hat = self.output_activation(x_hat)
+        return x_hat
+
     def forward(
         self, x: torch.Tensor, valid_mask: torch.Tensor | None = None
     ) -> dict[str, torch.Tensor]:
@@ -347,3 +367,29 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         if attn is not None:
             out["attn_weights"] = attn
         return out
+
+    def update(self, force: bool = False) -> bool:
+        return self.entropy_bottleneck.update(force=force)
+
+    def compress(self, x: torch.Tensor, valid_mask: torch.Tensor | None = None) -> dict:
+        z = self.encode(x, valid_mask=valid_mask)
+        strings = self.entropy_bottleneck.compress(z)
+        return {
+            "strings": [strings] if isinstance(strings, bytes) else strings,
+            "shape": z.shape[-2:],
+            "z_shape": tuple(z.shape),
+            "x_shape": tuple(x.shape),
+        }
+
+    def decompress(
+        self, strings, shape, z_shape=None, valid_mask: torch.Tensor | None = None
+    ) -> dict:
+        _ = z_shape
+        z_hat = self.entropy_bottleneck.decompress(strings, shape)
+        x_hat = self.decode(z_hat)
+        if valid_mask is not None:
+            x_hat = x_hat * valid_mask.float()
+        return {
+            "x_hat": x_hat,
+            "z_hat": z_hat,
+        }

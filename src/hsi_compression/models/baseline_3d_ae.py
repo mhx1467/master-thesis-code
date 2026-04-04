@@ -18,7 +18,6 @@ class Baseline3DAutoencoder(nn.Module):
         self.output_activation = output_activation
         h1, h2 = hidden_channels
 
-        # (N, C, 128, 128) -> (N, S, 128, 128)
         self.spectral_encoder_2d = nn.Sequential(
             nn.Conv2d(in_channels, spectral_reduced * 2, kernel_size=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -26,7 +25,6 @@ class Baseline3DAutoencoder(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        # (N, 1, S, 128, 128) -> (N, lc, S/4, 32, 32)
         self.enc3d = nn.Sequential(
             nn.Conv3d(1, h1, kernel_size=3, stride=(2, 2, 2), padding=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -36,7 +34,6 @@ class Baseline3DAutoencoder(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        # (N, lc, S/4, 32, 32) -> (N, 1, S, 128, 128)
         self.dec3d = nn.Sequential(
             nn.ConvTranspose3d(
                 latent_channels,
@@ -67,7 +64,10 @@ class Baseline3DAutoencoder(nn.Module):
         if output_activation == "sigmoid":
             decoder_layers.append(nn.Sigmoid())
         self.spectral_decoder_2d = nn.Sequential(*decoder_layers)
-        self.entropy_bottleneck = EntropyBottleneck(latent_channels * (spectral_reduced // 4))
+
+        self.entropy_bottleneck = EntropyBottleneck(
+            latent_channels * (spectral_reduced // 4)
+        )
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x_s = self.spectral_encoder_2d(x)
@@ -88,10 +88,33 @@ class Baseline3DAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
-        # z is 5D: (N, C, D, H, W). We reshape to 4D for EntropyBottleneck
-        N, C, D, H, W = z.shape
-        z_4d = z.view(N, C * D, H, W)
+        n, c, d, h, w = z.shape
+        z_4d = z.view(n, c * d, h, w)
         z_hat_4d, likelihoods = self.entropy_bottleneck(z_4d)
-        z_hat = z_hat_4d.view(N, C, D, H, W)
+        z_hat = z_hat_4d.view(n, c, d, h, w)
         x_hat = self.decode(z_hat)
         return {"x_hat": x_hat, "z": z, "z_hat": z_hat, "likelihoods": likelihoods}
+
+    def update(self, force: bool = False) -> bool:
+        return self.entropy_bottleneck.update(force=force)
+
+    def compress(self, x: torch.Tensor, **kwargs) -> dict:  # noqa: ARG002
+        z = self.encode(x)
+        n, c, d, h, w = z.shape
+        z_4d = z.view(n, c * d, h, w)
+        strings = self.entropy_bottleneck.compress(z_4d)
+        return {
+            "strings": strings,
+            "shape": (h, w),
+            "z_shape": tuple(z.shape),
+            "x_shape": tuple(x.shape),
+        }
+
+    def decompress(self, strings, shape, z_shape=None, **kwargs) -> dict:  # noqa: ARG002
+        if z_shape is None:
+            raise ValueError("z_shape is required for Baseline3DAutoencoder.decompress()")
+
+        z_hat_4d = self.entropy_bottleneck.decompress(strings, shape)
+        z_hat = z_hat_4d.view(z_shape)
+        x_hat = self.decode(z_hat)
+        return {"x_hat": x_hat, "z_hat": z_hat}

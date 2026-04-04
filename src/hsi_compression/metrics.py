@@ -1,4 +1,5 @@
 import math
+from collections.abc import Sequence
 
 import torch
 import torch.nn.functional as F
@@ -103,7 +104,6 @@ def masked_sam(
     x_p = x.permute(0, 2, 3, 1)
     mask_p = mask.permute(0, 2, 3, 1).bool()
 
-    # valid spectrum only if at least one valid band exists; keep masked multiplication
     x_hat_p = x_hat_p * mask_p
     x_p = x_p * mask_p
 
@@ -140,31 +140,24 @@ def masked_sam_deg(
 def compute_true_bpppc(
     likelihoods: torch.Tensor, original_shape: tuple[int, int, int, int]
 ) -> float:
-    N, C, H, W = original_shape
-    num_pixels = N * C * H * W
-
+    n, c, h, w = original_shape
+    num_values = n * c * h * w
     bits = torch.log(likelihoods).sum() / -math.log(2.0)
-
-    return (bits / num_pixels).item()
+    return (bits / num_values).item()
 
 
 def sid(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    # 1. Transform to HWC to operate on spectral vectors (dim=-1)
     x_hat_p = x_hat.permute(0, 2, 3, 1)
     x_p = x.permute(0, 2, 3, 1)
 
-    # 3. Protection against NaNs/Infs - if any value is NaN/Inf, the whole SID becomes NaN, which is undesirable.
     x_hat_pos = torch.clamp(x_hat_p, min=eps)
     x_pos = torch.clamp(x_p, min=eps)
 
-    # 3. Normalization of each spectral vector to sum to 1 (distributions p and q)
     p = x_pos / torch.sum(x_pos, dim=-1, keepdim=True)
     q = x_hat_pos / torch.sum(x_hat_pos, dim=-1, keepdim=True)
 
-    # 4. Calculation of KL divergence D(p||q) and D(q||p) for each pixel, then sum to get SID, and finally average over all pixels.
     d_pq = torch.sum(p * torch.log(p / q), dim=-1)
     d_qp = torch.sum(q * torch.log(q / p), dim=-1)
-
     sid_val = d_pq + d_qp
 
     return sid_val.mean()
@@ -185,13 +178,69 @@ def masked_sid(
 
     d_pq = torch.sum(p * torch.log(p / q), dim=-1)
     d_qp = torch.sum(q * torch.log(q / p), dim=-1)
-
     sid_val = d_pq + d_qp
 
-    # masking values - if any band is invalid, the whole pixel is invalid; keep masked multiplication for correct SID values
     pixel_mask = mask_p.any(dim=-1)
-
     if pixel_mask.sum() == 0:
         return torch.tensor(float("nan"), device=x.device)
 
     return sid_val[pixel_mask].mean()
+
+
+def _sum_string_bytes(obj) -> int:
+    """
+    Recursively sum byte lengths for CompressAI-style bitstream containers.
+
+    Supported forms:
+    - bytes
+    - [bytes, bytes, ...]
+    - [[bytes, ...], [bytes, ...], ...]
+    - tuples with the same nesting
+    """
+    if isinstance(obj, (bytes, bytearray)):
+        return len(obj)
+
+    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+        total = 0
+        for item in obj:
+            total += _sum_string_bytes(item)
+        return total
+
+    raise TypeError(f"Unsupported strings container type: {type(obj)!r}")
+
+
+def compute_actual_bpppc_from_strings(
+    strings,
+    original_shape: tuple[int, ...],
+) -> float:
+    """
+    Compute actual bits per pixel per channel from compressed bitstreams.
+
+    original_shape should be the original input tensor shape, typically (N, C, H, W).
+    """
+    if strings is None:
+        raise ValueError("strings must not be None")
+
+    total_bytes = _sum_string_bytes(strings)
+    total_bits = total_bytes * 8
+
+    if len(original_shape) != 4:
+        raise ValueError(
+            f"Expected original_shape to be (N, C, H, W), got {original_shape}"
+        )
+
+    n, c, h, w = original_shape
+    num_values = n * c * h * w
+    if num_values <= 0:
+        raise ValueError(f"Invalid original_shape: {original_shape}")
+
+    return total_bits / num_values
+
+
+def compute_compression_ratio_from_bpppc(
+    bpppc: float,
+    original_bits_per_channel: float = 16.0,
+) -> float | None:
+    if bpppc <= 0.0:
+        return None
+    return original_bits_per_channel / bpppc

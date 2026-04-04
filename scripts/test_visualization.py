@@ -53,7 +53,7 @@ def main():
 
     if isinstance(sample, dict):
         x = sample["x"]  # [C, H, W]
-        mask = sample.get("mask", None)
+        mask = sample.get("valid_mask", None)
     else:
         x = sample
         mask = None

@@ -11,12 +11,12 @@ pip install -e .
 ## Example usage
 
 ```bash
-python scripts/train.py --config configs/baseline_2d_ae.yaml
+python scripts/train.py --config configs/baseline_2d/baseline_2d_ae.yaml
 ```
 
 ## VM Management
 
-Create/update VM definitions in `configs/vms.yaml`.
+Create/update VM definitions in `configs/misc/vms.yaml`.
 
 Each VM entry supports:
 - `name`

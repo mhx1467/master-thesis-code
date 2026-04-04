@@ -10,7 +10,7 @@ import yaml
 
 from hsi_compression.paths import project_root
 
-DEFAULT_VM_CONFIG = project_root() / "configs" / "vms.yaml"
+DEFAULT_VM_CONFIG = project_root() / "configs" / "misc" / "vms.yaml"
 COMMAND_SCRIPTS = {
     "copy-dataset": project_root() / "scripts" / "commands" / "copy-data-set-to-vm.sh",
     "prepare-environment": project_root() / "scripts" / "commands" / "prepare-environment-on-vm.sh",
@@ -209,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         default=str(DEFAULT_VM_CONFIG),
-        help="Path to VM config YAML (default: configs/vms.yaml)",
+        help="Path to VM config YAML (default: configs/misc/vms.yaml)",
     )
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
