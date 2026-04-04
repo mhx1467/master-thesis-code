@@ -11,6 +11,8 @@ from tqdm.auto import tqdm
 from hsi_compression.data import build_dataloader, build_dataset
 from hsi_compression.engine.checkpointing import load_checkpoint
 from hsi_compression.metrics import (
+    compute_actual_bpppc_from_strings,
+    compute_compression_ratio_from_bpppc,
     compute_true_bpppc,
     invalid_region_mae,
     mae,
@@ -49,13 +51,43 @@ def parse_args():
     return parser.parse_args()
 
 
-def estimate_compression_ratio_from_bpppc(
-    bpppc: float,
-    original_bits_per_channel: float = ORIGINAL_BITS_PER_CHANNEL,
-) -> float | None:
-    if bpppc <= 0.0:
-        return None
-    return original_bits_per_channel / bpppc
+def _call_model_forward(model, x, mask):
+    try:
+        return model(x, valid_mask=mask)
+    except TypeError:
+        return model(x)
+
+
+def _call_model_compress(model, x, mask):
+    try:
+        return model.compress(x, valid_mask=mask)
+    except TypeError:
+        return model.compress(x)
+
+
+def _call_model_decompress(model, packed, mask):
+    kwargs = {
+        "strings": packed["strings"],
+        "shape": packed["shape"],
+    }
+    if "z_shape" in packed and packed["z_shape"] is not None:
+        kwargs["z_shape"] = packed["z_shape"]
+
+    try:
+        return model.decompress(valid_mask=mask, **kwargs)
+    except TypeError:
+        return model.decompress(**kwargs)
+
+
+def _validate_packed_output(packed: dict):
+    if not isinstance(packed, dict):
+        raise RuntimeError("model.compress() must return a dict")
+    if "strings" not in packed:
+        raise RuntimeError("model.compress() output must contain 'strings'")
+    if "shape" not in packed:
+        raise RuntimeError("model.compress() output must contain 'shape'")
+    if packed["strings"] is None:
+        raise RuntimeError("model.compress() returned strings=None")
 
 
 @torch.no_grad()
@@ -82,6 +114,18 @@ def evaluate_model(
         "sid": 0.0,
         "invalid_mae": 0.0,
         "bpppc": 0.0,
+        "actual_masked_mse": 0.0,
+        "actual_masked_mae": 0.0,
+        "actual_masked_psnr": 0.0,
+        "actual_masked_sam_deg": 0.0,
+        "actual_masked_sid": 0.0,
+        "actual_mse": 0.0,
+        "actual_mae": 0.0,
+        "actual_psnr": 0.0,
+        "actual_sam_deg": 0.0,
+        "actual_sid": 0.0,
+        "actual_invalid_mae": 0.0,
+        "actual_bpppc": 0.0,
     }
     num_batches = 0
     latent_shape = None
@@ -110,10 +154,7 @@ def evaluate_model(
             if device.type == "cuda":
                 start_event.record()
 
-            try:
-                outputs = model(x, valid_mask=mask)
-            except TypeError:
-                outputs = model(x)
+            outputs = _call_model_forward(model, x, mask)
 
             if device.type == "cuda":
                 end_event.record()
@@ -169,16 +210,64 @@ def evaluate_model(
         if latent_shape is None:
             latent_shape = tuple(z.shape[1:])
 
+        packed = _call_model_compress(model, x, mask)
+        _validate_packed_output(packed)
+        decoded = _call_model_decompress(model, packed, mask)
+
+        if not isinstance(decoded, dict) or "x_hat" not in decoded:
+            raise RuntimeError("model.decompress() must return a dict containing 'x_hat'")
+
+        x_hat_actual = decoded["x_hat"].float()
+
+        totals["actual_masked_mse"] += (
+            masked_mse(x_hat_actual, x, mask)
+            if mask is not None
+            else torch.mean((x_hat_actual - x) ** 2)
+        ).item()
+        totals["actual_masked_mae"] += (
+            masked_mae(x_hat_actual, x, mask)
+            if mask is not None
+            else torch.mean((x_hat_actual - x).abs())
+        ).item()
+        totals["actual_masked_psnr"] += (
+            masked_psnr(x_hat_actual, x, mask, data_range=1.0)
+            if mask is not None
+            else psnr(x_hat_actual, x)
+        ).item()
+        totals["actual_masked_sam_deg"] += (
+            masked_sam_deg(x_hat_actual, x, mask)
+            if mask is not None
+            else sam_deg(x_hat_actual, x)
+        ).item()
+        totals["actual_masked_sid"] += (
+            masked_sid(x_hat_actual, x, mask)
+            if mask is not None
+            else sid(x_hat_actual, x)
+        ).item()
+        totals["actual_mse"] += torch.mean((x_hat_actual - x) ** 2).item()
+        totals["actual_mae"] += mae(x_hat_actual, x).item()
+        totals["actual_psnr"] += psnr(x_hat_actual, x, data_range=1.0).item()
+        totals["actual_sam_deg"] += sam_deg(x_hat_actual, x).item()
+        totals["actual_sid"] += sid(x_hat_actual, x).item()
+        totals["actual_invalid_mae"] += (
+            invalid_region_mae(x_hat_actual, mask)
+            if mask is not None
+            else torch.tensor(0.0, device=device)
+        ).item()
+        totals["actual_bpppc"] += compute_actual_bpppc_from_strings(packed["strings"], x.shape)
+
         num_batches += 1
 
         if show_progress:
-            avg_bpppc = totals["bpppc"] / num_batches
-            avg_cr_est = estimate_compression_ratio_from_bpppc(avg_bpppc)
+            avg_actual_bpppc = totals["actual_bpppc"] / num_batches
+            avg_actual_cr = compute_compression_ratio_from_bpppc(
+                avg_actual_bpppc, ORIGINAL_BITS_PER_CHANNEL
+            )
             progress.set_postfix(
                 {
-                    "mPSNR": f"{totals['masked_psnr'] / num_batches:.2f}dB",
-                    "bpppc": f"{avg_bpppc:.4f}",
-                    "CR(est)": f"{avg_cr_est:.2f}:1" if avg_cr_est is not None else "n/a",
+                    "mPSNR": f"{totals['actual_masked_psnr'] / num_batches:.2f}dB",
+                    "act_bpppc": f"{avg_actual_bpppc:.4f}",
+                    "CR(act)": f"{avg_actual_cr:.2f}:1" if avg_actual_cr is not None else "n/a",
                 }
             )
 
@@ -186,9 +275,13 @@ def evaluate_model(
     out = {k: v / n for k, v in totals.items()}
     out["latent_shape"] = latent_shape
     out["num_batches"] = num_batches
-    out["compression_ratio_est"] = estimate_compression_ratio_from_bpppc(out["bpppc"])
+    out["compression_ratio_est"] = compute_compression_ratio_from_bpppc(
+        out["bpppc"], ORIGINAL_BITS_PER_CHANNEL
+    )
+    out["actual_compression_ratio"] = compute_compression_ratio_from_bpppc(
+        out["actual_bpppc"], ORIGINAL_BITS_PER_CHANNEL
+    )
 
-    # First 5 batches may be outliers due to warmup, so exclude them if enough batches are present.
     if len(inference_times) > 5:
         out["inference_ms_per_batch"] = sum(inference_times[5:]) / len(inference_times[5:])
     elif len(inference_times) > 0:
@@ -265,6 +358,17 @@ def main():
 
     load_checkpoint(path=checkpoint_path, model=model, optimizer=None, map_location=device)
 
+    if not hasattr(model, "update"):
+        raise RuntimeError(
+            f"Model '{model_name}' does not implement update(); actual compression is unavailable."
+        )
+    model.update(force=True)
+
+    if not hasattr(model, "compress") or not hasattr(model, "decompress"):
+        raise RuntimeError(
+            f"Model '{model_name}' must implement compress() and decompress() for actual CR."
+        )
+
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     metrics = evaluate_model(
@@ -277,28 +381,33 @@ def main():
     )
 
     print(f"\n{'=' * 55}")
-    print(f"  Model:      {model_name}")
-    print(f"  Split:      {args.split} [{difficulty}]")
-    print(f"  Samples:    {len(ds)}")
-    print(f"  Params:     {num_params:,}")
+    print(f"  Model:        {model_name}")
+    print(f"  Split:        {args.split} [{difficulty}]")
+    print(f"  Samples:      {len(ds)}")
+    print(f"  Params:       {num_params:,}")
     print(f"{'-' * 55}")
-    print(f"  mPSNR:      {metrics['masked_psnr']:.4f} dB")
-    print(f"  mSAM:       {metrics['masked_sam_deg']:.4f} °")
-    print(f"  mSID:       {metrics['masked_sid']:.6f}")
-    print(f"  mMSE:       {metrics['masked_mse']:.6f}")
-    print(f"  PSNR:       {metrics['psnr']:.4f} dB")
-    print(f"  SAM:        {metrics['sam_deg']:.4f} °")
-    print(f"  SID:        {metrics['sid']:.6f}")
-    print(f"  MSE:        {metrics['mse']:.6f}")
-    print(f"  invalidMAE: {metrics['invalid_mae']:.6f}")
-    print(f"  bpppc:      {metrics['bpppc']:.6f}")
+    print(f"  Est. mPSNR:   {metrics['masked_psnr']:.4f} dB")
+    print(f"  Est. mSAM:    {metrics['masked_sam_deg']:.4f} °")
+    print(f"  Est. mSID:    {metrics['masked_sid']:.6f}")
+    print(f"  Est. bpppc:   {metrics['bpppc']:.6f}")
     print(
-        f"  Est. CR:    {metrics['compression_ratio_est']:.4f}:1"
+        f"  Est. CR:      {metrics['compression_ratio_est']:.4f}:1"
         if metrics["compression_ratio_est"] is not None
-        else "  Est. CR:    n/a"
+        else "  Est. CR:      n/a"
     )
-    print(f"  Latent:     {metrics['latent_shape']}")
-    print(f"  Infer Time: {metrics['inference_ms_per_batch']:.2f} ms / batch")
+    print(f"{'-' * 55}")
+    print(f"  Actual mPSNR: {metrics['actual_masked_psnr']:.4f} dB")
+    print(f"  Actual mSAM:  {metrics['actual_masked_sam_deg']:.4f} °")
+    print(f"  Actual mSID:  {metrics['actual_masked_sid']:.6f}")
+    print(f"  Actual bpppc: {metrics['actual_bpppc']:.6f}")
+    print(
+        f"  Actual CR:    {metrics['actual_compression_ratio']:.4f}:1"
+        if metrics["actual_compression_ratio"] is not None
+        else "  Actual CR:    n/a"
+    )
+    print(f"{'-' * 55}")
+    print(f"  Latent:       {metrics['latent_shape']}")
+    print(f"  Infer Time:   {metrics['inference_ms_per_batch']:.2f} ms / batch")
     print(f"{'=' * 55}\n")
 
     result = {
@@ -351,6 +460,17 @@ def main():
                     "eval/invalid_mae": metrics["invalid_mae"],
                     "eval/bpppc": metrics["bpppc"],
                     "eval/compression_ratio_est": metrics["compression_ratio_est"],
+                    "eval/actual_masked_psnr": metrics["actual_masked_psnr"],
+                    "eval/actual_masked_sam_deg": metrics["actual_masked_sam_deg"],
+                    "eval/actual_masked_sid": metrics["actual_masked_sid"],
+                    "eval/actual_masked_mse": metrics["actual_masked_mse"],
+                    "eval/actual_psnr": metrics["actual_psnr"],
+                    "eval/actual_sam_deg": metrics["actual_sam_deg"],
+                    "eval/actual_sid": metrics["actual_sid"],
+                    "eval/actual_mse": metrics["actual_mse"],
+                    "eval/actual_invalid_mae": metrics["actual_invalid_mae"],
+                    "eval/actual_bpppc": metrics["actual_bpppc"],
+                    "eval/actual_compression_ratio": metrics["actual_compression_ratio"],
                     "eval/inference_ms_per_batch": metrics["inference_ms_per_batch"],
                 }
             )

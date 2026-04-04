@@ -83,3 +83,21 @@ class Baseline2DAutoencoder(nn.Module):
             "z_hat": z_hat,
             "likelihoods": likelihoods,
         }
+
+    def update(self, force: bool = False) -> bool:
+        return self.entropy_bottleneck.update(force=force)
+
+    def compress(self, x: torch.Tensor, **kwargs) -> dict:  # noqa: ARG002  # noqa: ARG002
+        z = self.encode(x)
+        strings = self.entropy_bottleneck.compress(z)
+        return {
+            "strings": strings,
+            "shape": z.shape[-2:],
+            "z_shape": tuple(z.shape),
+            "x_shape": tuple(x.shape),
+        }
+
+    def decompress(self, strings, shape, **kwargs) -> dict:  # noqa: ARG002  # noqa: ARG002
+        z_hat = self.entropy_bottleneck.decompress(strings, shape)
+        x_hat = self.decode(z_hat)
+        return {"x_hat": x_hat, "z_hat": z_hat}

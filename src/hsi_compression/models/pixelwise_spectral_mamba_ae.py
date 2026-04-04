@@ -248,11 +248,16 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         }
 
     def _forward_eval_chunked(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        z = self.encode(x)
+        z_hat, likelihoods = self.entropy_bottleneck(z)
+        x_hat = self.decode(z_hat)
+        return {"x_hat": x_hat, "z": z, "z_hat": z_hat, "likelihoods": likelihoods}
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
         x_bhwc = rearrange(x, "b c h w -> b (h w) c")
         num_pixels = h * w
         chunk = max(1, self.eval_chunk_size)
-        xhat_batches = []
         z_batches = []
         for bi in range(b):
             x_pix = x_bhwc[bi]
@@ -263,33 +268,7 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
                 z_chunks.append(z_chunk)
             z_pix = torch.cat(z_chunks, dim=0)
             z_batches.append(rearrange(z_pix, "(h w) l -> l h w", h=h, w=w))
-
-        z = torch.stack(z_batches, dim=0)
-        z_hat, likelihoods = self.entropy_bottleneck(z)
-
-        for bi in range(b):
-            z_hat_pix = rearrange(z_hat[bi], "l h w -> (h w) l")
-            xhat_chunks = []
-            for start in range(0, num_pixels, chunk):
-                z_hat_chunk = z_hat_pix[start : start + chunk]
-                xhat_chunk = self.decode_pixels(z_hat_chunk)
-                xhat_chunks.append(xhat_chunk)
-            xhat_pix = torch.cat(xhat_chunks, dim=0)
-            xhat_batches.append(rearrange(xhat_pix, "(h w) c -> c h w", h=h, w=w))
-
-        x_hat = torch.stack(xhat_batches, dim=0)
-        return {"x_hat": x_hat, "z": z, "z_hat": z_hat, "likelihoods": likelihoods}
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        out = self._forward_eval_chunked(x)
-        return out["z"]
-
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
-        # z: (B, L, H, W)
-        b, l_c, h, w = z.shape
-        z_pix = rearrange(z, "b l h w -> (b h w) l")
-        x_hat_pix, _ = self.decode_pixels(z_pix)
-        return rearrange(x_hat_pix, "(b h w) c -> b c h w", b=b, h=h, w=w)
+        return torch.stack(z_batches, dim=0)
 
     def forward(
         self, x: torch.Tensor, valid_mask: torch.Tensor | None = None
