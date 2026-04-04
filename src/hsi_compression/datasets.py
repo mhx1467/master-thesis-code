@@ -5,7 +5,7 @@ import tifffile as tiff
 import torch
 from torch.utils.data import Dataset
 
-from hsi_compression.constants import NODATA_VALUE
+from hsi_compression.constants import GLOBAL_MAX, GLOBAL_MIN, NODATA_VALUE
 
 _NPY_SHAPE_HWC = (128, 128, 202)
 _NPY_SHAPE_CHW = (202, 128, 128)
@@ -37,31 +37,33 @@ class HSITiffDataset(Dataset):
         if not self.paths:
             raise ValueError("Empty dataset: no paths provided.")
 
-        self._use_npy = False
-        if prefer_npy:
-            npy_path = self._tif_to_npy_path(self.paths[0])
-            if npy_path.exists():
-                sample = np.load(str(npy_path), mmap_mode="r")
-                if sample.shape == _NPY_SHAPE_CHW:
-                    self._use_npy = True
-                    self._npy_is_chw = True
-                elif sample.shape == _NPY_SHAPE_HWC:
-                    self._use_npy = True
-                    self._npy_is_chw = False
-                else:
-                    import warnings
+        first_path = self.paths[0]
+        self._use_npy = first_path.suffix.lower() == ".npy"
+        if self._use_npy:
+            sample = np.load(str(first_path), mmap_mode="r")
+            if sample.shape == _NPY_SHAPE_CHW:
+                self._npy_is_chw = True
+            elif sample.shape == _NPY_SHAPE_HWC:
+                self._npy_is_chw = False
+            else:
+                raise ValueError(
+                    f"Unexpected .npy shape {sample.shape} for {first_path}. "
+                    "Expected (202, 128, 128) or (128, 128, 202)."
+                )
+        elif prefer_npy:
+            import warnings
 
-                    warnings.warn(
-                        f"Unexpected .npy shape {sample.shape}. Fallback to .TIF.",
-                        UserWarning,
-                    )
+            warnings.warn(
+                "Split resolved to TIF files; applying reference preprocessing on the fly.",
+                UserWarning,
+            )
 
     def __len__(self) -> int:
         return len(self.paths)
 
     def __getitem__(self, idx: int):
         path = self.paths[idx]
-        patch_id = path.stem.replace("-SPECTRAL_IMAGE", "")
+        patch_id = path.stem.replace("-SPECTRAL_IMAGE", "").replace("-DATA", "")
 
         if self._use_npy:
             x = self._load_npy(path)
@@ -109,8 +111,7 @@ class HSITiffDataset(Dataset):
 
         return mask
 
-    def _load_npy(self, tif_path: Path):
-        npy_path = self._tif_to_npy_path(tif_path)
+    def _load_npy(self, npy_path: Path):
         data = np.load(str(npy_path), mmap_mode="r" if self.npy_mmap else None)
         out = data if self._npy_is_chw else data.transpose(2, 0, 1)
         if self.drop_invalid_channels and self.invalid_channels:
@@ -135,12 +136,11 @@ class HSITiffDataset(Dataset):
             x = x[keep]
             valid_mask = valid_mask[keep]
 
-        return x, valid_mask
+        x = np.clip(x, GLOBAL_MIN, GLOBAL_MAX)
+        x = x / (GLOBAL_MAX - GLOBAL_MIN)
+        valid_mask = np.ones_like(valid_mask, dtype=bool)
 
-    @staticmethod
-    def _tif_to_npy_path(tif_path: Path) -> Path:
-        stem = tif_path.stem.replace("-SPECTRAL_IMAGE", "")
-        return tif_path.parent / f"{stem}-DATA.npy"
+        return x, valid_mask
 
     @property
     def using_npy(self) -> bool:

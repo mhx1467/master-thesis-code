@@ -1,6 +1,4 @@
 from pathlib import Path
-
-import torch
 from torch.utils.data import DataLoader
 
 from hsi_compression.constants import (
@@ -10,9 +8,7 @@ from hsi_compression.constants import (
     WATER_VAPOR_BANDS,
 )
 from hsi_compression.datasets import HSITiffDataset
-from hsi_compression.paths import default_stats_path
 from hsi_compression.splits import resolve_split_paths, split_csv_path
-from hsi_compression.transforms import GlobalMinMaxNormalize
 
 
 def build_dataset(
@@ -30,33 +26,10 @@ def build_dataset(
     csv_path = split_csv_path(dataset_root, split_name, difficulty)
     paths = resolve_split_paths(dataset_root, csv_path)
 
-    npy_available = False
-    if prefer_npy and paths:
-        stem = paths[0].stem.replace("-SPECTRAL_IMAGE", "")
-        npy_available = (paths[0].parent / f"{stem}-DATA.npy").exists()
-
-    transform = None
-    if normalized and not npy_available:
-        stats_path = Path(stats_path) if stats_path is not None else default_stats_path(difficulty)
-        if not stats_path.exists():
-            raise FileNotFoundError(
-                f"No stats found: {stats_path}\nRun: python scripts/build_stats.py {dataset_root}"
-            )
-        stats = torch.load(stats_path, map_location="cpu", weights_only=True)
-        if "global_min" not in stats or "global_max" not in stats:
-            raise KeyError(
-                "Stats file missing 'global_min'/'global_max'.\n"
-                "Regenerate: python scripts/build_stats.py <dataset_root>"
-            )
-        transform = GlobalMinMaxNormalize(
-            global_min=float(stats["global_min"]),
-            global_max=float(stats["global_max"]),
-        )
-
     return HSITiffDataset(
         paths=paths,
         nodata_value=NODATA_VALUE,
-        transform=transform,
+        transform=None,
         return_mask=return_mask,
         invalid_channels=WATER_VAPOR_BANDS,
         drop_invalid_channels=drop_invalid_channels,

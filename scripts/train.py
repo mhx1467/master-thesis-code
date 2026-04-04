@@ -101,7 +101,8 @@ def main():
     use_amp = training_cfg.get("use_amp", True) and device.type == "cuda"
 
     print(
-        f"\nDataset: {difficulty} split | drop_invalid_channels={drop_invalid} | normalization: global min-max [0,1]"
+        f"\nDataset: {difficulty} split | drop_invalid_channels={drop_invalid} | "
+        "normalization: reference HySpecNet [clip 0..10000 -> /10000]"
     )
     print(f"AMP enabled: {use_amp}")
 

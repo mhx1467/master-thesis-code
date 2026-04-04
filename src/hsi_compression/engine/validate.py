@@ -13,6 +13,8 @@ from hsi_compression.metrics import (
     masked_sam_deg,
     masked_sid,
     psnr,
+    ref_sam_deg,
+    ref_ssim,
     sam_deg,
     sid,
 )
@@ -42,10 +44,12 @@ def validate_one_epoch(
         "mse": 0.0,
         "mae": 0.0,
         "psnr": 0.0,
+        "ssim": 0.0,
         "sam_deg": 0.0,
         "sid": 0.0,
         "invalid_mae": 0.0,
-        "bpppc": 0.0,
+        "ref_bpppc": 0.0,
+        "likelihood_bpppc": 0.0,
     }
     num_batches = 0
     latent_shape = None
@@ -96,7 +100,8 @@ def validate_one_epoch(
         mse_val = torch.mean((x_hat - x) ** 2)
         mae_val = mae(x_hat, x)
         psnr_val = psnr(x_hat, x, data_range=1.0)
-        sam_val = sam_deg(x_hat, x) if compute_sam else None
+        ssim_val = ref_ssim(x_hat, x, data_range=1.0, channels=x.shape[1])
+        sam_val = ref_sam_deg(x_hat, x) if compute_sam else None
         invalid_mae_val = (
             invalid_region_mae(x_hat, mask)
             if mask is not None
@@ -110,6 +115,7 @@ def validate_one_epoch(
         totals["mse"] += mse_val.item()
         totals["mae"] += mae_val.item()
         totals["psnr"] += psnr_val.item()
+        totals["ssim"] += ssim_val.item()
         totals["invalid_mae"] += invalid_mae_val.item()
         if compute_sam:
             totals["masked_sam_deg"] += masked_sam_val.item()
@@ -126,9 +132,13 @@ def validate_one_epoch(
 
             likelihoods = outputs.get("likelihoods")
             if likelihoods is not None:
-                totals["bpppc"] += compute_true_bpppc(likelihoods, x.shape)
+                totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
             else:
                 raise RuntimeError("Model does not return likelihoods; cannot compute true bpppc.")
+
+        model_ref_bpppc = getattr(model.module if hasattr(model, "module") else model, "bpppc", None)
+        if model_ref_bpppc is not None:
+            totals["ref_bpppc"] += float(model_ref_bpppc)
 
         if use_progress:
             postfix = {"loss": f"{loss_val.item():.5f}", "mPSNR": f"{masked_psnr_val.item():.2f}dB"}

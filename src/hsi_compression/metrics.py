@@ -3,6 +3,7 @@ from collections.abc import Sequence
 
 import torch
 import torch.nn.functional as F
+import pytorch_msssim
 
 
 def _to_mask_float(mask: torch.Tensor) -> torch.Tensor:
@@ -36,6 +37,22 @@ def mse(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
 
 def mae(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(x_hat, x)
+
+
+def ref_ssim(
+    x_hat: torch.Tensor,
+    x: torch.Tensor,
+    data_range: float = 1.0,
+    channels: int | None = None,
+) -> torch.Tensor:
+    if channels is None:
+        channels = int(x.shape[1])
+    metric = pytorch_msssim.SSIM(data_range=data_range, channel=channels).to(x.device)
+    return metric(x_hat, x)
+
+
+def ssim(x_hat: torch.Tensor, x: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
+    return ref_ssim(x_hat, x, data_range=data_range, channels=int(x.shape[1]))
 
 
 def masked_mse(
@@ -94,6 +111,14 @@ def sam(
     return torch.acos(cos).mean()
 
 
+def ref_sam(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    numerator = torch.sum(x_hat * x, dim=1)
+    denominator = torch.sqrt(torch.sum(x_hat**2, dim=1) * torch.sum(x**2, dim=1))
+    fraction = numerator / denominator
+    sa = torch.acos(fraction)
+    return sa.mean()
+
+
 def masked_sam(
     x_hat: torch.Tensor,
     x: torch.Tensor,
@@ -126,6 +151,10 @@ def sam_deg(
     eps: float = 1e-8,
 ) -> torch.Tensor:
     return sam(x_hat, x, eps=eps) * (180.0 / math.pi)
+
+
+def ref_sam_deg(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    return torch.rad2deg(ref_sam(x_hat, x))
 
 
 def masked_sam_deg(
