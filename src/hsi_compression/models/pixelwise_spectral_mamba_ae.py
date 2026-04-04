@@ -309,3 +309,7 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
             f"Unexpected valid_mask shape {valid_mask.shape}. "
             f"Expected channel dim 1 or {x.shape[1]}."
         )
+
+    @property
+    def bpppc(self) -> float:
+        return self.latent_channels / self.in_channels

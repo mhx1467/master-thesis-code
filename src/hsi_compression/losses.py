@@ -97,13 +97,12 @@ class RateDistortionLoss(nn.Module):
         mask: torch.Tensor | None,
         likelihoods: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
         D = self.distortion_fn(x_hat, x, mask)
 
         N, C, H, W = x.shape
         num_pixels = N * C * H * W
 
-        bits = torch.log(likelihoods).sum() / -math.log(2.0)
+        bits = torch.log(likelihoods.clamp_min(1e-12)).sum() / -math.log(2.0)
         R = bits / num_pixels
 
         loss = D + self.lmbda * R

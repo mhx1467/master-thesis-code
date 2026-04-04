@@ -76,10 +76,8 @@ def _call_model_decompress(model, packed, mask):
     if "z_shape" in packed and packed["z_shape"] is not None:
         kwargs["z_shape"] = packed["z_shape"]
 
-    try:
-        return model.decompress(valid_mask=mask, **kwargs)
-    except TypeError:
-        return model.decompress(**kwargs)
+    _ = mask
+    return model.decompress(**kwargs)
 
 
 def _validate_packed_output(packed: dict):
@@ -215,7 +213,9 @@ def evaluate_model(
             else torch.tensor(0.0, device=device)
         ).item()
         totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
-        model_ref_bpppc = getattr(model.module if hasattr(model, "module") else model, "bpppc", None)
+        model_ref_bpppc = getattr(
+            model.module if hasattr(model, "module") else model, "bpppc", None
+        )
         if model_ref_bpppc is not None:
             totals["ref_bpppc"] += float(model_ref_bpppc)
 
@@ -356,11 +356,13 @@ def main():
     model_section = ckpt_config.get("model", {})
     data_section = ckpt_config.get("data", {})
     training_section = ckpt_config.get("training", {})
+    experiment_section = ckpt_config.get("experiment", {})
 
     model_name = model_section.get("model_name")
     model_kwargs = model_section.get("model_kwargs", {})
     difficulty = args.difficulty or data_section.get("difficulty", "easy")
     use_amp = training_section.get("use_amp", True) and device.type == "cuda"
+    eval_seed = experiment_section.get("seed", 42)
 
     ds = build_dataset(
         dataset_root=dataset_root,
@@ -379,6 +381,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        seed=eval_seed,
     )
 
     sample = ds[0] if not args.subset_size else ds.dataset[0]
@@ -386,7 +389,7 @@ def main():
     num_input_bands = sample_x.shape[0]
 
     print(f"Input bands: {num_input_bands}")
-    print("Evaluation dataset source: split-resolved benchmark artifacts")
+    print("Evaluation dataset source: split-resolved benchmark DATA.npy artifacts")
     print(f"Original bits per channel for CR estimation: {ORIGINAL_BITS_PER_CHANNEL:.0f}")
 
     model = build_model(

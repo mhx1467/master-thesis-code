@@ -104,3 +104,14 @@ class Baseline1DAutoencoderV2(nn.Module):
         z_hat = self.entropy_bottleneck.decompress(strings, shape)
         x_hat = self.decode(z_hat)
         return {"x_hat": x_hat, "z_hat": z_hat}
+
+    @property
+    def bpppc(self) -> float:
+        latent_h = 32
+        latent_w = 32
+        input_h = 128
+        input_w = 128
+        latent_channels_total = self._latent_channels * self._latent_len
+        return (latent_channels_total * latent_h * latent_w) / (
+            self.in_channels * input_h * input_w
+        )

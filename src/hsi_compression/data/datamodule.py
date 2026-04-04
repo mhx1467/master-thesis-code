@@ -1,4 +1,8 @@
+import random
 from pathlib import Path
+
+import numpy as np
+import torch
 from torch.utils.data import DataLoader
 
 from hsi_compression.constants import (
@@ -22,6 +26,7 @@ def build_dataset(
     prefer_npy: bool = True,
     npy_mmap: bool = False,
 ):
+    _ = normalized, stats_path
     dataset_root = Path(dataset_root)
     csv_path = split_csv_path(dataset_root, split_name, difficulty)
     paths = resolve_split_paths(dataset_root, csv_path)
@@ -47,7 +52,22 @@ def build_dataloader(
     pin_memory: bool = True,
     persistent_workers: bool | None = None,
     prefetch_factor: int | None = 2,
+    seed: int | None = None,
 ) -> DataLoader:
+    generator = None
+    worker_init_fn = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+
+        def _seed_worker(worker_id: int) -> None:
+            worker_seed = (seed + worker_id) % (2**32)
+            random.seed(worker_seed)
+            np.random.seed(worker_seed)
+            torch.manual_seed(worker_seed)
+
+        worker_init_fn = _seed_worker
+
     kwargs = {
         "batch_size": batch_size,
         "shuffle": (shuffle if sampler is None else False),
@@ -55,6 +75,8 @@ def build_dataloader(
         "num_workers": num_workers,
         "pin_memory": pin_memory,
         "drop_last": False,
+        "generator": generator,
+        "worker_init_fn": worker_init_fn,
     }
 
     if num_workers > 0:

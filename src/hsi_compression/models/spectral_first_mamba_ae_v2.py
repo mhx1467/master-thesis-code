@@ -376,10 +376,6 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         x_hat = self._refine_output(x_hat)
         x_hat = self.output_activation(x_hat)
 
-        # zero out background pixels on output (guarantee of clean NoData)
-        if mask_float is not None:
-            x_hat = x_hat * mask_float
-
         out = {"x_hat": x_hat, "z": z, "z_hat": z_hat, "likelihoods": likelihoods}
         if attn is not None:
             out["attn_weights"] = attn
@@ -402,11 +398,18 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         self, strings, shape, z_shape=None, valid_mask: torch.Tensor | None = None
     ) -> dict:
         _ = z_shape
+        _ = valid_mask
         z_hat = self.entropy_bottleneck.decompress(strings, shape)
         x_hat = self.decode(z_hat)
-        if valid_mask is not None:
-            x_hat = x_hat * valid_mask.float()
         return {
             "x_hat": x_hat,
             "z_hat": z_hat,
         }
+
+    @property
+    def bpppc(self) -> float:
+        latent_h = 32
+        latent_w = 32
+        input_h = 128
+        input_w = 128
+        return (self.latent_channels * latent_h * latent_w) / (self.in_channels * input_h * input_w)

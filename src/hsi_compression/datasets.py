@@ -51,11 +51,9 @@ class HSITiffDataset(Dataset):
                     "Expected (202, 128, 128) or (128, 128, 202)."
                 )
         elif prefer_npy:
-            import warnings
-
-            warnings.warn(
-                "Split resolved to TIF files; applying reference preprocessing on the fly.",
-                UserWarning,
+            raise ValueError(
+                "Benchmark dataset path resolved to TIF files. "
+                "Train/val/test benchmark runs must use preprocessed '*-DATA.npy' artifacts."
             )
 
     def __len__(self) -> int:
@@ -138,7 +136,6 @@ class HSITiffDataset(Dataset):
 
         x = np.clip(x, GLOBAL_MIN, GLOBAL_MAX)
         x = x / (GLOBAL_MAX - GLOBAL_MIN)
-        valid_mask = np.ones_like(valid_mask, dtype=bool)
 
         return x, valid_mask
 

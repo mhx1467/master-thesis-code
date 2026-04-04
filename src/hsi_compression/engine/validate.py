@@ -78,8 +78,15 @@ def validate_one_epoch(
             except TypeError:
                 outputs = model(x)
             x_hat = outputs["x_hat"].float()
+            x_hat_for_loss = outputs.get("x_hat_for_loss", x_hat).float()
+            x_target = outputs.get("x_target", x)
+            mask_for_loss = outputs.get("mask_for_loss", mask)
             z = outputs.get("z")
-            loss_val = loss_fn(x_hat, x, mask)
+            likelihoods = outputs.get("likelihoods")
+            if likelihoods is not None and hasattr(loss_fn, "lmbda"):
+                loss_val, _, _ = loss_fn(x_hat_for_loss, x_target, mask_for_loss, likelihoods)
+            else:
+                loss_val = loss_fn(x_hat_for_loss, x_target, mask_for_loss)
 
         masked_mse_val = (
             masked_mse(x_hat, x, mask) if mask is not None else torch.mean((x_hat - x) ** 2)
@@ -130,13 +137,14 @@ def validate_one_epoch(
             if latent_shape is None:
                 latent_shape = tuple(z.shape[1:])
 
-            likelihoods = outputs.get("likelihoods")
             if likelihoods is not None:
                 totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
             else:
                 raise RuntimeError("Model does not return likelihoods; cannot compute true bpppc.")
 
-        model_ref_bpppc = getattr(model.module if hasattr(model, "module") else model, "bpppc", None)
+        model_ref_bpppc = getattr(
+            model.module if hasattr(model, "module") else model, "bpppc", None
+        )
         if model_ref_bpppc is not None:
             totals["ref_bpppc"] += float(model_ref_bpppc)
 

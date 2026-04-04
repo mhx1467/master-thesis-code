@@ -1,9 +1,9 @@
 import math
 from collections.abc import Sequence
 
+import pytorch_msssim
 import torch
 import torch.nn.functional as F
-import pytorch_msssim
 
 
 def _to_mask_float(mask: torch.Tensor) -> torch.Tensor:
@@ -113,8 +113,8 @@ def sam(
 
 def ref_sam(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     numerator = torch.sum(x_hat * x, dim=1)
-    denominator = torch.sqrt(torch.sum(x_hat**2, dim=1) * torch.sum(x**2, dim=1))
-    fraction = numerator / denominator
+    denominator = torch.sqrt(torch.sum(x_hat**2, dim=1) * torch.sum(x**2, dim=1)).clamp_min(1e-12)
+    fraction = (numerator / denominator).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
     sa = torch.acos(fraction)
     return sa.mean()
 
@@ -171,7 +171,7 @@ def compute_true_bpppc(
 ) -> float:
     n, c, h, w = original_shape
     num_values = n * c * h * w
-    bits = torch.log(likelihoods).sum() / -math.log(2.0)
+    bits = torch.log(likelihoods.clamp_min(1e-12)).sum() / -math.log(2.0)
     return (bits / num_values).item()
 
 

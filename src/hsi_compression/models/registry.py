@@ -70,7 +70,7 @@ def build_pixelwise_spectral_mamba_ae(in_channels: int, **kwargs):
         mamba_expand=kwargs.get("mamba_expand", 2),
         pooling=kwargs.get("pooling", "attention"),
         refinement_hidden_channels=kwargs.get("refinement_hidden_channels", 16),
-        pixels_per_patch=kwargs.get("pixels_per_patch", 512),
+        pixels_per_patch=kwargs.get("pixels_per_patch"),
         eval_chunk_size=kwargs.get("eval_chunk_size", 8192),
         output_activation=kwargs.get("output_activation", "sigmoid"),
         dropout=kwargs.get("dropout", 0.0),

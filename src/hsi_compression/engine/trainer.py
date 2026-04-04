@@ -63,10 +63,8 @@ def fit(
             start_epoch = ckpt["epoch"] + 1
             best_val_loss = ckpt.get("best_val_loss", float("inf"))
             best_val_ref_psnr = ckpt.get("extra", {}).get("best_val_ref_psnr", float("-inf"))
-            print(
-                f"Resumed {start_epoch} | Best loss: {best_val_loss:.6f} | "
-                f"Best ref PSNR: {best_val_ref_psnr:.2f} dB\n"
-            )
+            metric_msg = f"Best ref PSNR: {best_val_ref_psnr:.2f} dB"
+            print(f"Resumed {start_epoch} | {metric_msg}\n")
         elif is_main_process():
             print("No last.pt found — starting training from scratch.")
 
@@ -195,7 +193,8 @@ def fit(
 
             val_loss = record["val/loss"]
             val_ref_psnr = record["val/psnr"]
-            if val_ref_psnr > best_val_ref_psnr + early_psnr_min_delta:
+            improved = val_ref_psnr > best_val_ref_psnr + early_psnr_min_delta
+            if improved:
                 best_val_loss = val_loss
                 best_val_ref_psnr = val_ref_psnr
                 epochs_without_improvement = 0
