@@ -5,7 +5,8 @@ experiment:
 data:
   difficulty: easy
   batch_size: 64
-  num_workers: 12
+  num_workers: 0
+  pin_memory: false
   drop_invalid_channels: true
   train_subset_size: null
   val_subset_size: null
@@ -36,7 +37,7 @@ model:
   model_name: baseline_2d_ae
   model_kwargs:
     in_channels: 202
-    latent_channels: 64  # ZABLOKOWANY, DUŻY ROZMIAR LATENTA
+    latent_channels: 64
     hidden_channels: [128, 64]
 
 logging:
