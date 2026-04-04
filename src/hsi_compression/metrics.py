@@ -225,9 +225,7 @@ def compute_actual_bpppc_from_strings(
     total_bits = total_bytes * 8
 
     if len(original_shape) != 4:
-        raise ValueError(
-            f"Expected original_shape to be (N, C, H, W), got {original_shape}"
-        )
+        raise ValueError(f"Expected original_shape to be (N, C, H, W), got {original_shape}")
 
     n, c, h, w = original_shape
     num_values = n * c * h * w

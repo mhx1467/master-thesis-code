@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import Subset
+from torchmetrics.functional.image import structural_similarity_index_measure as ssim
 from tqdm.auto import tqdm
 
 from hsi_compression.data import build_dataloader, build_dataset
@@ -126,6 +127,7 @@ def evaluate_model(
         "actual_sid": 0.0,
         "actual_invalid_mae": 0.0,
         "actual_bpppc": 0.0,
+        "actual_ssim": 0.0,
     }
     num_batches = 0
     latent_shape = None
@@ -186,9 +188,34 @@ def evaluate_model(
         totals["masked_mae"] += (
             masked_mae(x_hat, x, mask) if mask is not None else torch.mean((x_hat - x).abs())
         ).item()
-        totals["masked_psnr"] += (
-            masked_psnr(x_hat, x, mask, data_range=1.0) if mask is not None else psnr(x_hat, x)
-        ).item()
+        if (
+            hasattr(loader.dataset, "dataset")
+            and hasattr(loader.dataset.dataset, "transform")
+            and hasattr(loader.dataset.dataset.transform, "inverse")
+        ):
+            x_hat_phys = loader.dataset.dataset.transform.inverse(x_hat)
+            x_phys = loader.dataset.dataset.transform.inverse(x)
+        elif hasattr(loader.dataset, "transform") and hasattr(loader.dataset.transform, "inverse"):
+            x_hat_phys = loader.dataset.transform.inverse(x_hat)
+            x_phys = loader.dataset.transform.inverse(x)
+        else:
+            x_hat_phys = x_hat
+            x_phys = x
+
+        # PsNR using physical range if inverse exists
+        if x_hat_phys is not x_hat:
+            totals["masked_psnr"] += (
+                masked_psnr(x_hat_phys, x_phys, mask, data_range=10000.0)
+                if mask is not None
+                else psnr(x_hat_phys, x_phys, data_range=10000.0)
+            ).item()
+            totals["psnr"] += psnr(x_hat_phys, x_phys, data_range=10000.0).item()
+        else:
+            totals["masked_psnr"] += (
+                masked_psnr(x_hat, x, mask, data_range=1.0) if mask is not None else psnr(x_hat, x)
+            ).item()
+            totals["psnr"] += psnr(x_hat, x, data_range=1.0).item()
+
         totals["masked_sam_deg"] += (
             masked_sam_deg(x_hat, x, mask) if mask is not None else sam_deg(x_hat, x)
         ).item()
@@ -197,7 +224,7 @@ def evaluate_model(
         ).item()
         totals["mse"] += torch.mean((x_hat - x) ** 2).item()
         totals["mae"] += mae(x_hat, x).item()
-        totals["psnr"] += psnr(x_hat, x, data_range=1.0).item()
+
         totals["sam_deg"] += sam_deg(x_hat, x).item()
         totals["sid"] += sid(x_hat, x).item()
         totals["invalid_mae"] += (
@@ -229,24 +256,67 @@ def evaluate_model(
             if mask is not None
             else torch.mean((x_hat_actual - x).abs())
         ).item()
-        totals["actual_masked_psnr"] += (
-            masked_psnr(x_hat_actual, x, mask, data_range=1.0)
-            if mask is not None
-            else psnr(x_hat_actual, x)
-        ).item()
+        if (
+            hasattr(loader.dataset, "dataset")
+            and hasattr(loader.dataset.dataset, "transform")
+            and hasattr(loader.dataset.dataset.transform, "inverse")
+        ):
+            x_hat_actual_phys = loader.dataset.dataset.transform.inverse(x_hat_actual)
+            # x_phys already calculated
+        elif hasattr(loader.dataset, "transform") and hasattr(loader.dataset.transform, "inverse"):
+            x_hat_actual_phys = loader.dataset.transform.inverse(x_hat_actual)
+        else:
+            x_hat_actual_phys = x_hat_actual
+
+        if x_hat_actual_phys is not x_hat_actual:
+            totals["actual_masked_psnr"] += (
+                masked_psnr(x_hat_actual_phys, x_phys, mask, data_range=10000.0)
+                if mask is not None
+                else psnr(x_hat_actual_phys, x_phys, data_range=10000.0)
+            ).item()
+            totals["actual_psnr"] += psnr(x_hat_actual_phys, x_phys, data_range=10000.0).item()
+        else:
+            totals["actual_masked_psnr"] += (
+                masked_psnr(x_hat_actual, x, mask, data_range=1.0)
+                if mask is not None
+                else psnr(x_hat_actual, x)
+            ).item()
+            totals["actual_psnr"] += psnr(x_hat_actual, x, data_range=1.0).item()
+
         totals["actual_masked_sam_deg"] += (
-            masked_sam_deg(x_hat_actual, x, mask)
-            if mask is not None
-            else sam_deg(x_hat_actual, x)
+            masked_sam_deg(x_hat_actual, x, mask) if mask is not None else sam_deg(x_hat_actual, x)
         ).item()
         totals["actual_masked_sid"] += (
-            masked_sid(x_hat_actual, x, mask)
-            if mask is not None
-            else sid(x_hat_actual, x)
+            masked_sid(x_hat_actual, x, mask) if mask is not None else sid(x_hat_actual, x)
         ).item()
         totals["actual_mse"] += torch.mean((x_hat_actual - x) ** 2).item()
         totals["actual_mae"] += mae(x_hat_actual, x).item()
-        totals["actual_psnr"] += psnr(x_hat_actual, x, data_range=1.0).item()
+
+        with torch.no_grad():
+            B, C, H, W = x.shape
+
+            x_ssim = x.view(B * C, 1, H, W)
+            x_hat_ssim = x_hat_actual.view(B * C, 1, H, W)
+
+            _, ssim_map = ssim(x_hat_ssim, x_ssim, data_range=1.0, return_full_image=True)
+
+            if mask is not None:
+                mask_expanded = mask.expand(-1, C, -1, -1) if mask.shape[1] == 1 else mask
+
+                mask_ssim = mask_expanded.reshape(B * C, 1, H, W).bool()
+
+                if ssim_map.shape == mask_ssim.shape:
+                    valid_ssim_values = ssim_map[mask_ssim]
+                    if valid_ssim_values.numel() > 0:
+                        batch_masked_ssim = valid_ssim_values.mean().item()
+                    else:
+                        batch_masked_ssim = 0.0
+                else:
+                    batch_masked_ssim = ssim_map.mean().item()
+            else:
+                batch_masked_ssim = ssim_map.mean().item()
+
+        totals["actual_ssim"] = totals.get("actual_ssim", 0.0) + batch_masked_ssim
         totals["actual_sam_deg"] += sam_deg(x_hat_actual, x).item()
         totals["actual_sid"] += sid(x_hat_actual, x).item()
         totals["actual_invalid_mae"] += (
@@ -273,6 +343,7 @@ def evaluate_model(
 
     n = max(num_batches, 1)
     out = {k: v / n for k, v in totals.items()}
+    out["actual_ssim"] = totals["actual_ssim"] / n
     out["latent_shape"] = latent_shape
     out["num_batches"] = num_batches
     out["compression_ratio_est"] = compute_compression_ratio_from_bpppc(
@@ -397,6 +468,9 @@ def main():
     )
     print(f"{'-' * 55}")
     print(f"  Actual mPSNR: {metrics['actual_masked_psnr']:.4f} dB")
+    print(f"  Actual mSSIM: {metrics['actual_ssim']:.4f}")
+    actual_mae_scaled = metrics["actual_masked_mae"] * 10000.0
+    print(f"  Actual mMAE:  {actual_mae_scaled:.2f} (skala 0-10000)")
     print(f"  Actual mSAM:  {metrics['actual_masked_sam_deg']:.4f} °")
     print(f"  Actual mSID:  {metrics['actual_masked_sid']:.6f}")
     print(f"  Actual bpppc: {metrics['actual_bpppc']:.6f}")
@@ -460,6 +534,7 @@ def main():
                     "eval/invalid_mae": metrics["invalid_mae"],
                     "eval/bpppc": metrics["bpppc"],
                     "eval/compression_ratio_est": metrics["compression_ratio_est"],
+                    "eval/actual_ssim": metrics["actual_ssim"],
                     "eval/actual_masked_psnr": metrics["actual_masked_psnr"],
                     "eval/actual_masked_sam_deg": metrics["actual_masked_sam_deg"],
                     "eval/actual_masked_sid": metrics["actual_masked_sid"],

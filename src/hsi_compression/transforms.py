@@ -25,7 +25,11 @@ class GlobalMinMaxNormalize:
 
         if valid_mask is not None:
             x = x.clone()
-            x[~valid_mask] = 0.0
+            if valid_mask.any():
+                valid_mean = x[valid_mask].mean()
+                x[~valid_mask] = valid_mean
+            else:
+                x[~valid_mask] = 0.0
 
         return x
 
