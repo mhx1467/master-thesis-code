@@ -29,6 +29,28 @@ def parse_args():
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--disable-wandb", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+
+    parser.add_argument(
+        "--pretrained",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--override-rd-lambda",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--override-lr",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--override-epochs",
+        type=int,
+        default=None,
+    )
+
     return parser.parse_args()
 
 
@@ -42,6 +64,15 @@ def main():
     training_cfg = cfg.get("training", {})
     model_cfg = cfg.get("model", {})
     logging_cfg = cfg.get("logging", {})
+
+    if args.override_rd_lambda is not None:
+        training_cfg["rd_lambda"] = args.override_rd_lambda
+    if args.override_lr is not None:
+        training_cfg["lr"] = args.override_lr
+    if args.override_epochs is not None:
+        training_cfg["epochs"] = args.override_epochs
+
+    cfg["training"] = training_cfg
 
     dataset_root = Path(
         args.dataset_root or os.environ.get("DATASET_ROOT") or "/data/hyspecnet-11k"
@@ -188,6 +219,17 @@ def main():
     model = build_model(model_name=model_name, in_channels=num_input_bands, **model_kwargs).to(
         device
     )
+
+    if args.pretrained:
+        pretrained_path = Path(args.pretrained)
+        if not pretrained_path.exists():
+            print(f"Error: Pretrained weights not found: {pretrained_path}")
+            sys.exit(1)
+
+        print(f"\n[RD Cascade] Ładowanie pre-trenowanych wag z: {pretrained_path}")
+        ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print("[RD Cascade] Wagi załadowane pomyślnie. Rozpoczynamy Fine-Tuning.\n")
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {model_name} | Parameters: {n_params:,}")

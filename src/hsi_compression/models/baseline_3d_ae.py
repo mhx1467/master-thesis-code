@@ -65,9 +65,7 @@ class Baseline3DAutoencoder(nn.Module):
             decoder_layers.append(nn.Sigmoid())
         self.spectral_decoder_2d = nn.Sequential(*decoder_layers)
 
-        self.entropy_bottleneck = EntropyBottleneck(
-            latent_channels * (spectral_reduced // 4)
-        )
+        self.entropy_bottleneck = EntropyBottleneck(latent_channels * (spectral_reduced // 4))
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x_s = self.spectral_encoder_2d(x)

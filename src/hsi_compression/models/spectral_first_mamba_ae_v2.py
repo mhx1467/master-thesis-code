@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -184,7 +186,9 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         self.spectral_d_model = spectral_d_model
         self.spectral_out_channels = spectral_out_channels
         self.pooling = pooling
-        self.num_tokens = in_channels // group_size
+        self.c_pad = int(math.ceil(in_channels / group_size) * group_size)
+        self.pad_bands = self.c_pad - in_channels
+        self.num_tokens = self.c_pad // group_size
 
         self.token_embed = nn.Linear(group_size, spectral_d_model)
         self.pos_embed = nn.Parameter(torch.zeros(1, self.num_tokens, spectral_d_model))
@@ -217,6 +221,9 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
             nn.LayerNorm(spectral_d_model),
             nn.Linear(spectral_d_model, spectral_out_channels),
             nn.GELU(),
+        )
+        self.downsample_spec = nn.Conv2d(
+            spectral_out_channels, spectral_out_channels, kernel_size=2, stride=2
         )
 
         self.spatial_condition = SpatialConditionPath(
@@ -269,6 +276,10 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         b, c, h, w = x.shape
         x_pix = rearrange(x, "b c h w -> (b h w) c")
+
+        if self.pad_bands > 0:
+            x_pix = F.pad(x_pix, (0, self.pad_bands), mode="constant", value=0.0)
+
         tokens = rearrange(x_pix, "n (t g) -> n t g", g=self.group_size)
         h_tok = self.token_embed(tokens) + self.pos_embed
 
@@ -311,11 +322,16 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
     def encode(self, x: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
         mask_float = valid_mask.float() if valid_mask is not None else None
         gamma, beta = self.spatial_condition(x, mask=mask_float)
-        x_low = F.avg_pool2d(x, kernel_size=4, stride=4)
+
+        x_low = F.avg_pool2d(x, kernel_size=2, stride=2)
         mask_low = None
         if mask_float is not None:
-            mask_low = F.max_pool2d(mask_float, kernel_size=4, stride=4)
+            mask_low = F.max_pool2d(mask_float, kernel_size=2, stride=2)
+
         spec_feat, _ = self._spectral_encode_grid(x_low, mask=mask_low)
+
+        spec_feat = self.downsample_spec(spec_feat)
+
         fused = spec_feat * (1.0 + gamma)
         if beta is not None:
             fused = fused + beta
@@ -337,13 +353,14 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         gamma, beta = self.spatial_condition(x, mask=mask_float)
 
         # 2. spectral branch (with mask-aware pooling)
-        x_low = F.avg_pool2d(x, kernel_size=4, stride=4)
+        x_low = F.avg_pool2d(x, kernel_size=2, stride=2)
         mask_low = None
         if mask_float is not None:
             # max_pool2d keeps mask as 1.0 if at least one sub-pixel was valid, ensuring that the spectral branch receives valid context for all pixels that have any valid neighbors
-            mask_low = F.max_pool2d(mask_float, kernel_size=4, stride=4)
+            mask_low = F.max_pool2d(mask_float, kernel_size=2, stride=2)
 
         spec_feat, attn = self._spectral_encode_grid(x_low, mask=mask_low)
+        spec_feat = self.downsample_spec(spec_feat)
 
         # 3. fusion of spatial and spectral features (affine modulation)
         fused = spec_feat * (1.0 + gamma)
