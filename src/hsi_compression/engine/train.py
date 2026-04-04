@@ -16,6 +16,7 @@ from hsi_compression.metrics import (
     psnr,
     sam_deg,
     sid,
+    ssim,
 )
 from hsi_compression.utils.distributed import is_main_process, reduce_mean
 
@@ -47,6 +48,7 @@ def train_one_epoch(
         "mse": 0.0,
         "mae": 0.0,
         "psnr": 0.0,
+        "ssim": 0.0,
         "sam_deg": 0.0,
         "sid": 0.0,
         "invalid_mae": 0.0,
@@ -137,6 +139,7 @@ def train_one_epoch(
             mse_val = torch.mean((x_hat - x_target) ** 2)
             mae_val = mae(x_hat, x_target)
             psnr_val = psnr(x_hat, x_target, data_range=1.0)
+            ssim_val = ssim(x_hat, x_target, data_range=1.0)
             sam_val = sam_deg(x_hat, x_target)
             masked_sid_val = (
                 masked_sid(x_hat, x_target, mask_for_loss)
@@ -162,6 +165,7 @@ def train_one_epoch(
             "mse": mse_val.item(),
             "mae": mae_val.item(),
             "psnr": psnr_val.item(),
+            "ssim": ssim_val.item(),
             "sam_deg": sam_val.item(),
             "sid": sid_val.item(),
             "invalid_mae": invalid_mae_val.item(),

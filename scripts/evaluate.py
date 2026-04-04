@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import Subset
-from torchmetrics.functional.image import structural_similarity_index_measure as ssim
+from torchmetrics.functional.image import structural_similarity_index_measure as tm_ssim
 from tqdm.auto import tqdm
 
 from hsi_compression.data import build_dataloader, build_dataset
@@ -23,6 +23,8 @@ from hsi_compression.metrics import (
     masked_sam_deg,
     masked_sid,
     psnr,
+    ref_sam_deg,
+    ref_ssim,
     sam_deg,
     sid,
 )
@@ -42,7 +44,7 @@ def parse_args():
     parser.add_argument("dataset_root", nargs="?", default=None)
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--difficulty", type=str, default=None)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--subset-size", type=int, default=None)
     parser.add_argument("--run-name", type=str, default=None)
@@ -111,10 +113,12 @@ def evaluate_model(
         "mse": 0.0,
         "mae": 0.0,
         "psnr": 0.0,
+        "ssim": 0.0,
         "sam_deg": 0.0,
         "sid": 0.0,
         "invalid_mae": 0.0,
-        "bpppc": 0.0,
+        "ref_bpppc": 0.0,
+        "likelihood_bpppc": 0.0,
         "actual_masked_mse": 0.0,
         "actual_masked_mae": 0.0,
         "actual_masked_psnr": 0.0,
@@ -188,33 +192,11 @@ def evaluate_model(
         totals["masked_mae"] += (
             masked_mae(x_hat, x, mask) if mask is not None else torch.mean((x_hat - x).abs())
         ).item()
-        if (
-            hasattr(loader.dataset, "dataset")
-            and hasattr(loader.dataset.dataset, "transform")
-            and hasattr(loader.dataset.dataset.transform, "inverse")
-        ):
-            x_hat_phys = loader.dataset.dataset.transform.inverse(x_hat)
-            x_phys = loader.dataset.dataset.transform.inverse(x)
-        elif hasattr(loader.dataset, "transform") and hasattr(loader.dataset.transform, "inverse"):
-            x_hat_phys = loader.dataset.transform.inverse(x_hat)
-            x_phys = loader.dataset.transform.inverse(x)
-        else:
-            x_hat_phys = x_hat
-            x_phys = x
-
-        # PsNR using physical range if inverse exists
-        if x_hat_phys is not x_hat:
-            totals["masked_psnr"] += (
-                masked_psnr(x_hat_phys, x_phys, mask, data_range=10000.0)
-                if mask is not None
-                else psnr(x_hat_phys, x_phys, data_range=10000.0)
-            ).item()
-            totals["psnr"] += psnr(x_hat_phys, x_phys, data_range=10000.0).item()
-        else:
-            totals["masked_psnr"] += (
-                masked_psnr(x_hat, x, mask, data_range=1.0) if mask is not None else psnr(x_hat, x)
-            ).item()
-            totals["psnr"] += psnr(x_hat, x, data_range=1.0).item()
+        totals["masked_psnr"] += (
+            masked_psnr(x_hat, x, mask, data_range=1.0) if mask is not None else psnr(x_hat, x)
+        ).item()
+        totals["psnr"] += psnr(x_hat, x, data_range=1.0).item()
+        totals["ssim"] += ref_ssim(x_hat, x, data_range=1.0, channels=x.shape[1]).item()
 
         totals["masked_sam_deg"] += (
             masked_sam_deg(x_hat, x, mask) if mask is not None else sam_deg(x_hat, x)
@@ -225,14 +207,17 @@ def evaluate_model(
         totals["mse"] += torch.mean((x_hat - x) ** 2).item()
         totals["mae"] += mae(x_hat, x).item()
 
-        totals["sam_deg"] += sam_deg(x_hat, x).item()
+        totals["sam_deg"] += ref_sam_deg(x_hat, x).item()
         totals["sid"] += sid(x_hat, x).item()
         totals["invalid_mae"] += (
             invalid_region_mae(x_hat, mask)
             if mask is not None
             else torch.tensor(0.0, device=device)
         ).item()
-        totals["bpppc"] += compute_true_bpppc(likelihoods, x.shape)
+        totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
+        model_ref_bpppc = getattr(model.module if hasattr(model, "module") else model, "bpppc", None)
+        if model_ref_bpppc is not None:
+            totals["ref_bpppc"] += float(model_ref_bpppc)
 
         if latent_shape is None:
             latent_shape = tuple(z.shape[1:])
@@ -256,32 +241,12 @@ def evaluate_model(
             if mask is not None
             else torch.mean((x_hat_actual - x).abs())
         ).item()
-        if (
-            hasattr(loader.dataset, "dataset")
-            and hasattr(loader.dataset.dataset, "transform")
-            and hasattr(loader.dataset.dataset.transform, "inverse")
-        ):
-            x_hat_actual_phys = loader.dataset.dataset.transform.inverse(x_hat_actual)
-            # x_phys already calculated
-        elif hasattr(loader.dataset, "transform") and hasattr(loader.dataset.transform, "inverse"):
-            x_hat_actual_phys = loader.dataset.transform.inverse(x_hat_actual)
-        else:
-            x_hat_actual_phys = x_hat_actual
-
-        if x_hat_actual_phys is not x_hat_actual:
-            totals["actual_masked_psnr"] += (
-                masked_psnr(x_hat_actual_phys, x_phys, mask, data_range=10000.0)
-                if mask is not None
-                else psnr(x_hat_actual_phys, x_phys, data_range=10000.0)
-            ).item()
-            totals["actual_psnr"] += psnr(x_hat_actual_phys, x_phys, data_range=10000.0).item()
-        else:
-            totals["actual_masked_psnr"] += (
-                masked_psnr(x_hat_actual, x, mask, data_range=1.0)
-                if mask is not None
-                else psnr(x_hat_actual, x)
-            ).item()
-            totals["actual_psnr"] += psnr(x_hat_actual, x, data_range=1.0).item()
+        totals["actual_masked_psnr"] += (
+            masked_psnr(x_hat_actual, x, mask, data_range=1.0)
+            if mask is not None
+            else psnr(x_hat_actual, x)
+        ).item()
+        totals["actual_psnr"] += psnr(x_hat_actual, x, data_range=1.0).item()
 
         totals["actual_masked_sam_deg"] += (
             masked_sam_deg(x_hat_actual, x, mask) if mask is not None else sam_deg(x_hat_actual, x)
@@ -298,7 +263,7 @@ def evaluate_model(
             x_ssim = x.view(B * C, 1, H, W)
             x_hat_ssim = x_hat_actual.view(B * C, 1, H, W)
 
-            _, ssim_map = ssim(x_hat_ssim, x_ssim, data_range=1.0, return_full_image=True)
+            _, ssim_map = tm_ssim(x_hat_ssim, x_ssim, data_range=1.0, return_full_image=True)
 
             if mask is not None:
                 mask_expanded = mask.expand(-1, C, -1, -1) if mask.shape[1] == 1 else mask
@@ -346,8 +311,11 @@ def evaluate_model(
     out["actual_ssim"] = totals["actual_ssim"] / n
     out["latent_shape"] = latent_shape
     out["num_batches"] = num_batches
-    out["compression_ratio_est"] = compute_compression_ratio_from_bpppc(
-        out["bpppc"], ORIGINAL_BITS_PER_CHANNEL
+    out["ref_compression_ratio"] = compute_compression_ratio_from_bpppc(
+        out["ref_bpppc"], ORIGINAL_BITS_PER_CHANNEL
+    )
+    out["likelihood_compression_ratio"] = compute_compression_ratio_from_bpppc(
+        out["likelihood_bpppc"], ORIGINAL_BITS_PER_CHANNEL
     )
     out["actual_compression_ratio"] = compute_compression_ratio_from_bpppc(
         out["actual_bpppc"], ORIGINAL_BITS_PER_CHANNEL
@@ -401,7 +369,7 @@ def main():
         normalized=True,
         return_mask=True,
         drop_invalid_channels=data_section.get("drop_invalid_channels", True),
-        prefer_npy=False,
+        prefer_npy=True,
     )
     if args.subset_size:
         ds = Subset(ds, list(range(min(args.subset_size, len(ds)))))
@@ -418,7 +386,7 @@ def main():
     num_input_bands = sample_x.shape[0]
 
     print(f"Input bands: {num_input_bands}")
-    print("Evaluation dataset source: TIF (prefer_npy=False)")
+    print("Evaluation dataset source: split-resolved benchmark artifacts")
     print(f"Original bits per channel for CR estimation: {ORIGINAL_BITS_PER_CHANNEL:.0f}")
 
     model = build_model(
@@ -457,22 +425,32 @@ def main():
     print(f"  Samples:      {len(ds)}")
     print(f"  Params:       {num_params:,}")
     print(f"{'-' * 55}")
-    print(f"  Est. mPSNR:   {metrics['masked_psnr']:.4f} dB")
-    print(f"  Est. mSAM:    {metrics['masked_sam_deg']:.4f} °")
-    print(f"  Est. mSID:    {metrics['masked_sid']:.6f}")
-    print(f"  Est. bpppc:   {metrics['bpppc']:.6f}")
+    print("  Reference metrics")
+    print(f"  PSNR:         {metrics['psnr']:.4f} dB")
+    print(f"  SSIM:         {metrics['ssim']:.4f}")
+    print(f"  SA:           {metrics['sam_deg']:.4f} °")
+    print(f"  bpppc(ref):   {metrics['ref_bpppc']:.6f}")
     print(
-        f"  Est. CR:      {metrics['compression_ratio_est']:.4f}:1"
-        if metrics["compression_ratio_est"] is not None
-        else "  Est. CR:      n/a"
+        f"  Ref. CR:      {metrics['ref_compression_ratio']:.4f}:1"
+        if metrics["ref_compression_ratio"] is not None
+        else "  Ref. CR:      n/a"
     )
     print(f"{'-' * 55}")
-    print(f"  Actual mPSNR: {metrics['actual_masked_psnr']:.4f} dB")
-    print(f"  Actual mSSIM: {metrics['actual_ssim']:.4f}")
-    actual_mae_scaled = metrics["actual_masked_mae"] * 10000.0
-    print(f"  Actual mMAE:  {actual_mae_scaled:.2f} (skala 0-10000)")
-    print(f"  Actual mSAM:  {metrics['actual_masked_sam_deg']:.4f} °")
-    print(f"  Actual mSID:  {metrics['actual_masked_sid']:.6f}")
+    print("  Additional metrics")
+    print(f"  mPSNR:        {metrics['masked_psnr']:.4f} dB")
+    print(f"  mSAM:         {metrics['masked_sam_deg']:.4f} °")
+    print(f"  mSID:         {metrics['masked_sid']:.6f}")
+    print(f"  likel. bpppc: {metrics['likelihood_bpppc']:.6f}")
+    print(
+        f"  Likel. CR:    {metrics['likelihood_compression_ratio']:.4f}:1"
+        if metrics["likelihood_compression_ratio"] is not None
+        else "  Likel. CR:    n/a"
+    )
+    print(f"  actual mPSNR: {metrics['actual_masked_psnr']:.4f} dB")
+    print(f"  actual mSSIM: {metrics['actual_ssim']:.4f}")
+    print(f"  actual mSAM:  {metrics['actual_masked_sam_deg']:.4f} °")
+    print(f"  actual mSID:  {metrics['actual_masked_sid']:.6f}")
+    print(f"  actual mMAE:  {metrics['actual_masked_mae']:.6f}")
     print(f"  Actual bpppc: {metrics['actual_bpppc']:.6f}")
     print(
         f"  Actual CR:    {metrics['actual_compression_ratio']:.4f}:1"
@@ -523,6 +501,13 @@ def main():
         ) as run:
             run.log(
                 {
+                    "eval/ref_psnr": metrics["psnr"],
+                    "eval/ref_ssim": metrics["ssim"],
+                    "eval/ref_sa_deg": metrics["sam_deg"],
+                    "eval/ref_bpppc": metrics["ref_bpppc"],
+                    "eval/ref_compression_ratio": metrics["ref_compression_ratio"],
+                    "eval/likelihood_bpppc": metrics["likelihood_bpppc"],
+                    "eval/likelihood_compression_ratio": metrics["likelihood_compression_ratio"],
                     "eval/masked_psnr": metrics["masked_psnr"],
                     "eval/masked_sam_deg": metrics["masked_sam_deg"],
                     "eval/masked_sid": metrics["masked_sid"],
@@ -532,8 +517,6 @@ def main():
                     "eval/sid": metrics["sid"],
                     "eval/mse": metrics["mse"],
                     "eval/invalid_mae": metrics["invalid_mae"],
-                    "eval/bpppc": metrics["bpppc"],
-                    "eval/compression_ratio_est": metrics["compression_ratio_est"],
                     "eval/actual_ssim": metrics["actual_ssim"],
                     "eval/actual_masked_psnr": metrics["actual_masked_psnr"],
                     "eval/actual_masked_sam_deg": metrics["actual_masked_sam_deg"],

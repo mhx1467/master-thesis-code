@@ -35,7 +35,7 @@ def fit(
 ):
     checkpoint_path = Path(checkpoint_path)
     best_val_loss = float("inf")
-    best_val_psnr = float("-inf")
+    best_val_ref_psnr = float("-inf")
     last_sam_deg = None
     start_epoch = 1
     history = []
@@ -62,9 +62,10 @@ def fit(
             )
             start_epoch = ckpt["epoch"] + 1
             best_val_loss = ckpt.get("best_val_loss", float("inf"))
-            best_val_psnr = ckpt.get("extra", {}).get("best_val_psnr", float("-inf"))
+            best_val_ref_psnr = ckpt.get("extra", {}).get("best_val_ref_psnr", float("-inf"))
             print(
-                f"Resumed {start_epoch} | Best loss: {best_val_loss:.6f} | Best PSNR: {best_val_psnr:.2f} dB\n"
+                f"Resumed {start_epoch} | Best loss: {best_val_loss:.6f} | "
+                f"Best ref PSNR: {best_val_ref_psnr:.2f} dB\n"
             )
         elif is_main_process():
             print("No last.pt found — starting training from scratch.")
@@ -134,6 +135,7 @@ def fit(
             "train/mse": train_metrics["mse"],
             "train/mae": train_metrics["mae"],
             "train/psnr": train_metrics["psnr"],
+            "train/ssim": train_metrics["ssim"],
             "train/sam_deg": train_metrics["sam_deg"],
             "train/sid": train_metrics.get("sid", 0.0),
             "train/invalid_mae": train_metrics["invalid_mae"],
@@ -147,10 +149,12 @@ def fit(
             "val/mse": val_metrics["mse"],
             "val/mae": val_metrics["mae"],
             "val/psnr": val_metrics["psnr"],
+            "val/ssim": val_metrics["ssim"],
             "val/sam_deg": val_metrics["sam_deg"],
             "val/sid": val_metrics.get("sid"),
             "val/invalid_mae": val_metrics["invalid_mae"],
-            "val/bpppc": val_metrics["bpppc"],
+            "val/ref_bpppc": val_metrics["ref_bpppc"],
+            "val/likelihood_bpppc": val_metrics["likelihood_bpppc"],
             "val/epoch_time_sec": val_metrics["epoch_time_sec"],
             "model/num_params": num_params,
         }
@@ -170,10 +174,10 @@ def fit(
             masked_sam_str = f"{masked_sam_val:.2f}°" if masked_sam_val is not None else "n/a"
             print(
                 f"  train mPSNR={record['train/masked_psnr']:.2f}dB | "
-                f"val mPSNR={record['val/masked_psnr']:.2f}dB | "
-                f"val PSNR={record['val/psnr']:.2f}dB | "
+                f"val ref PSNR={record['val/psnr']:.2f}dB | "
+                f"val ref SSIM={record['val/ssim']:.4f} | "
                 f"val mSAM={masked_sam_str} | "
-                f"bpppc={record['val/bpppc']:.4f}"
+                f"ref_bpppc={record['val/ref_bpppc']:.4f}"
             )
 
         if is_main_process():
@@ -190,10 +194,10 @@ def fit(
             )
 
             val_loss = record["val/loss"]
-            val_psnr = record["val/masked_psnr"]
-            if val_psnr > best_val_psnr + early_psnr_min_delta:
+            val_ref_psnr = record["val/psnr"]
+            if val_ref_psnr > best_val_ref_psnr + early_psnr_min_delta:
                 best_val_loss = val_loss
-                best_val_psnr = val_psnr
+                best_val_ref_psnr = val_ref_psnr
                 epochs_without_improvement = 0
                 save_checkpoint(
                     path=checkpoint_path,
@@ -205,17 +209,24 @@ def fit(
                     scheduler=scheduler,
                     extra={
                         "latent_shape": latent_shape,
-                        "best_val_psnr": best_val_psnr,
-                        "best_val_bpppc": record["val/bpppc"],
+                        "best_val_ref_psnr": best_val_ref_psnr,
+                        "best_val_ref_bpppc": record["val/ref_bpppc"],
+                        "best_val_likelihood_bpppc": record["val/likelihood_bpppc"],
+                        "best_val_ssim": record["val/ssim"],
                         "val_masked_sam_deg": last_sam_deg,
                     },
                 )
-                print(f"New best masked PSNR ({best_val_psnr:.2f} dB, loss={best_val_loss:.6f})")
+                print(
+                    f"New best reference PSNR ({best_val_ref_psnr:.2f} dB, "
+                    f"loss={best_val_loss:.6f})"
+                )
 
                 if logger is not None:
                     logger.summary["best_val_loss"] = best_val_loss
-                    logger.summary["best_val_masked_psnr"] = best_val_psnr
-                    logger.summary["best_val_bpppc"] = record["val/bpppc"]
+                    logger.summary["best_val_ref_psnr"] = best_val_ref_psnr
+                    logger.summary["best_val_ssim"] = record["val/ssim"]
+                    logger.summary["best_val_ref_bpppc"] = record["val/ref_bpppc"]
+                    logger.summary["best_val_likelihood_bpppc"] = record["val/likelihood_bpppc"]
                     logger.summary["best_epoch"] = epoch
 
                     import wandb
@@ -226,9 +237,11 @@ def fit(
                         metadata={
                             "epoch": epoch,
                             "val_loss": best_val_loss,
-                            "val_masked_psnr": best_val_psnr,
+                            "val_ref_psnr": best_val_ref_psnr,
+                            "val_ssim": record["val/ssim"],
                             "val_masked_sam_deg": last_sam_deg,
-                            "val_bpppc": record["val/bpppc"],
+                            "val_ref_bpppc": record["val/ref_bpppc"],
+                            "val_likelihood_bpppc": record["val/likelihood_bpppc"],
                             "latent_shape": str(latent_shape),
                         },
                     )
@@ -245,4 +258,8 @@ def fit(
     if _last_save_thread is not None:
         _last_save_thread.join()
 
-    return {"best_val_loss": best_val_loss, "best_val_psnr": best_val_psnr, "history": history}
+    return {
+        "best_val_loss": best_val_loss,
+        "best_val_ref_psnr": best_val_ref_psnr,
+        "history": history,
+    }
