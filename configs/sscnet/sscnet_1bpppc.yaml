@@ -4,8 +4,8 @@ experiment:
 
 data:
   difficulty: easy
-  batch_size: 64
-  num_workers: 0
+  batch_size: 16
+  num_workers: 4
   pin_memory: false
   persistent_workers: false
   prefetch_factor: 2
@@ -22,12 +22,12 @@ training:
   loss_name: masked_mse
   grad_clip_max_norm: 1.0
   scheduler:
-    enabled: true
+    enabled: false
     name: cosine
     T_max: 200
     eta_min: 1.0e-6
   early_stopping:
-    enabled: true
+    enabled: false
     patience: 30
     psnr_min_delta: 0.01
   sam_every_n_epochs: 10
