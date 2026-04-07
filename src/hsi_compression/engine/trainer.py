@@ -37,6 +37,9 @@ def fit(
     best_val_loss = float("inf")
     best_val_ref_psnr = float("-inf")
     last_sam_deg = None
+    prev_val_loss = None
+    prev_val_psnr = None
+    prev_val_ssim = None
     start_epoch = 1
     history = []
     _last_save_thread = None
@@ -170,14 +173,38 @@ def fit(
         if is_main_process():
             masked_sam_val = record["val/masked_sam_deg"]
             masked_sam_str = f"{masked_sam_val:.2f}°" if masked_sam_val is not None else "n/a"
+            val_loss_delta = (
+                record["val/loss"] - prev_val_loss if prev_val_loss is not None else None
+            )
+            val_psnr_delta = (
+                record["val/psnr"] - prev_val_psnr if prev_val_psnr is not None else None
+            )
+            val_ssim_delta = (
+                record["val/ssim"] - prev_val_ssim if prev_val_ssim is not None else None
+            )
+            val_loss_delta_str = (
+                f"{val_loss_delta:+.8f}" if val_loss_delta is not None else "n/a"
+            )
+            val_psnr_delta_str = (
+                f"{val_psnr_delta:+.8f}" if val_psnr_delta is not None else "n/a"
+            )
+            val_ssim_delta_str = (
+                f"{val_ssim_delta:+.8f}" if val_ssim_delta is not None else "n/a"
+            )
             print(
                 f"  train mPSNR={record['train/masked_psnr']:.4f}dB | "
                 f"val loss={record['val/loss']:.6f} | "
                 f"val ref PSNR={record['val/psnr']:.5f}dB | "
                 f"val ref SSIM={record['val/ssim']:.6f} | "
+                f"val dLoss={val_loss_delta_str} | "
+                f"val dPSNR={val_psnr_delta_str} | "
+                f"val dSSIM={val_ssim_delta_str} | "
                 f"val mSAM={masked_sam_str} | "
                 f"ref_bpppc={record['val/ref_bpppc']:.4f}"
             )
+            prev_val_loss = record["val/loss"]
+            prev_val_psnr = record["val/psnr"]
+            prev_val_ssim = record["val/ssim"]
 
         if is_main_process():
             if _last_save_thread is not None:
