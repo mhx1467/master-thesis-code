@@ -33,10 +33,12 @@ class Baseline2DAutoencoder(nn.Module):
         in_channels: int = 224,
         hidden_channels: tuple[int, int] = (128, 64),
         latent_channels: int = 16,
+        output_activation: str | None = "sigmoid",
     ):
         super().__init__()
         self.in_channels = in_channels
         self.latent_channels = latent_channels
+        self.output_activation = output_activation
 
         h1, h2 = hidden_channels
 
@@ -57,6 +59,12 @@ class Baseline2DAutoencoder(nn.Module):
         self.dec_block2 = ConvBlock(h1, h1)
 
         self.out_conv = nn.Conv2d(h1, in_channels, kernel_size=3, padding=1)
+        if output_activation == "sigmoid":
+            self.output_head = nn.Sigmoid()
+        elif output_activation in (None, "identity"):
+            self.output_head = nn.Identity()
+        else:
+            raise ValueError("output_activation must be one of: 'sigmoid', 'identity', None")
         self.entropy_bottleneck = EntropyBottleneck(latent_channels)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -73,7 +81,7 @@ class Baseline2DAutoencoder(nn.Module):
         x = self.up2(x)
         x = self.dec_block2(x)
         x_hat = self.out_conv(x)
-        return x_hat
+        return self.output_head(x_hat)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
@@ -105,9 +113,17 @@ class Baseline2DAutoencoder(nn.Module):
         return {"x_hat": x_hat, "z_hat": z_hat}
 
     @property
-    def bpppc(self) -> float:
+    def proxy_bpppc(self) -> float:
         latent_h = 32
         latent_w = 32
         input_h = 128
         input_w = 128
         return (self.latent_channels * latent_h * latent_w) / (self.in_channels * input_h * input_w)
+
+    @property
+    def bpppc(self) -> float:
+        return self.proxy_bpppc
+
+
+class Baseline2DPatchAutoencoder(Baseline2DAutoencoder):
+    """Named 2D patch baseline used in the internal benchmark."""

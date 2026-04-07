@@ -407,9 +407,13 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         }
 
     @property
-    def bpppc(self) -> float:
+    def proxy_bpppc(self) -> float:
         latent_h = 32
         latent_w = 32
         input_h = 128
         input_w = 128
         return (self.latent_channels * latent_h * latent_w) / (self.in_channels * input_h * input_w)
+
+    @property
+    def bpppc(self) -> float:
+        return self.proxy_bpppc

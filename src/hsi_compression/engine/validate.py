@@ -34,6 +34,15 @@ def validate_one_epoch(
     use_amp: bool = False,
 ):
     model.eval()
+
+    def _get_proxy_bpppc(model_obj) -> float | None:
+        model_raw = model_obj.module if hasattr(model_obj, "module") else model_obj
+        proxy = getattr(model_raw, "proxy_bpppc", None)
+        if proxy is not None:
+            return float(proxy)
+        legacy = getattr(model_raw, "bpppc", None)
+        return float(legacy) if legacy is not None else None
+
     totals = {
         "loss": 0.0,
         "masked_mse": 0.0,
@@ -48,6 +57,7 @@ def validate_one_epoch(
         "sam_deg": 0.0,
         "sid": 0.0,
         "invalid_mae": 0.0,
+        "proxy_bpppc": 0.0,
         "ref_bpppc": 0.0,
         "likelihood_bpppc": 0.0,
     }
@@ -142,11 +152,10 @@ def validate_one_epoch(
                 has_likelihoods = True
                 totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
 
-        model_ref_bpppc = getattr(
-            model.module if hasattr(model, "module") else model, "bpppc", None
-        )
-        if model_ref_bpppc is not None:
-            totals["ref_bpppc"] += float(model_ref_bpppc)
+        model_proxy_bpppc = _get_proxy_bpppc(model)
+        if model_proxy_bpppc is not None:
+            totals["proxy_bpppc"] += model_proxy_bpppc
+            totals["ref_bpppc"] += model_proxy_bpppc
 
         if use_progress:
             postfix = {"loss": f"{loss_val.item():.5f}", "mPSNR": f"{masked_psnr_val.item():.2f}dB"}

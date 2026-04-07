@@ -1,5 +1,5 @@
 experiment:
-  name: paper_pixelwise_spectral_mamba_ae_latent16
+  name: pixelwise_mamba_ae_latent16
   seed: 42
 
 data:
@@ -33,7 +33,7 @@ training:
     psnr_min_delta: 0.01
 
 model:
-  model_name: pixelwise_spectral_mamba_ae
+  model_name: pixelwise_mamba_ae
   model_kwargs:
     in_channels: 202
     latent_channels: 16

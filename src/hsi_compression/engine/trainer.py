@@ -36,6 +36,7 @@ def fit(
     checkpoint_path = Path(checkpoint_path)
     best_val_loss = float("inf")
     best_val_ref_psnr = float("-inf")
+    best_selection_metric = float("inf") if hasattr(loss_fn, "lmbda") else float("-inf")
     last_sam_deg = None
     prev_val_loss = None
     prev_val_psnr = None
@@ -66,6 +67,10 @@ def fit(
             start_epoch = ckpt["epoch"] + 1
             best_val_loss = ckpt.get("best_val_loss", float("inf"))
             best_val_ref_psnr = ckpt.get("extra", {}).get("best_val_ref_psnr", float("-inf"))
+            best_selection_metric = ckpt.get("extra", {}).get(
+                "best_selection_metric",
+                best_val_loss if hasattr(loss_fn, "lmbda") else best_val_ref_psnr,
+            )
             metric_msg = f"Best ref PSNR: {best_val_ref_psnr:.2f} dB"
             print(f"Resumed {start_epoch} | {metric_msg}\n")
         elif is_main_process():
@@ -154,6 +159,7 @@ def fit(
             "val/sam_deg": val_metrics["sam_deg"],
             "val/sid": val_metrics.get("sid"),
             "val/invalid_mae": val_metrics["invalid_mae"],
+            "val/proxy_bpppc": val_metrics["proxy_bpppc"],
             "val/ref_bpppc": val_metrics["ref_bpppc"],
             "val/likelihood_bpppc": val_metrics["likelihood_bpppc"],
             "val/epoch_time_sec": val_metrics["epoch_time_sec"],
@@ -200,7 +206,7 @@ def fit(
                 f"val dPSNR={val_psnr_delta_str} | "
                 f"val dSSIM={val_ssim_delta_str} | "
                 f"val mSAM={masked_sam_str} | "
-                f"ref_bpppc={record['val/ref_bpppc']:.4f}"
+                f"proxy_bpppc={record['val/proxy_bpppc']:.4f}"
             )
             prev_val_loss = record["val/loss"]
             prev_val_psnr = record["val/psnr"]
@@ -221,10 +227,16 @@ def fit(
 
             val_loss = record["val/loss"]
             val_ref_psnr = record["val/psnr"]
-            improved = val_ref_psnr > best_val_ref_psnr + early_psnr_min_delta
+            if hasattr(loss_fn, "lmbda"):
+                selection_metric = val_loss
+                improved = selection_metric < best_selection_metric
+            else:
+                selection_metric = val_ref_psnr
+                improved = selection_metric > best_selection_metric + early_psnr_min_delta
             if improved:
                 best_val_loss = val_loss
                 best_val_ref_psnr = val_ref_psnr
+                best_selection_metric = selection_metric
                 epochs_without_improvement = 0
                 save_checkpoint(
                     path=checkpoint_path,
@@ -236,7 +248,9 @@ def fit(
                     scheduler=scheduler,
                     extra={
                         "latent_shape": latent_shape,
+                        "best_selection_metric": best_selection_metric,
                         "best_val_ref_psnr": best_val_ref_psnr,
+                        "best_val_proxy_bpppc": record["val/proxy_bpppc"],
                         "best_val_ref_bpppc": record["val/ref_bpppc"],
                         "best_val_likelihood_bpppc": record["val/likelihood_bpppc"],
                         "best_val_ssim": record["val/ssim"],
@@ -252,8 +266,10 @@ def fit(
                     logger.summary["best_val_loss"] = best_val_loss
                     logger.summary["best_val_ref_psnr"] = best_val_ref_psnr
                     logger.summary["best_val_ssim"] = record["val/ssim"]
+                    logger.summary["best_val_proxy_bpppc"] = record["val/proxy_bpppc"]
                     logger.summary["best_val_ref_bpppc"] = record["val/ref_bpppc"]
                     logger.summary["best_val_likelihood_bpppc"] = record["val/likelihood_bpppc"]
+                    logger.summary["best_selection_metric"] = best_selection_metric
                     logger.summary["best_epoch"] = epoch
 
                     import wandb
@@ -265,8 +281,10 @@ def fit(
                             "epoch": epoch,
                             "val_loss": best_val_loss,
                             "val_ref_psnr": best_val_ref_psnr,
+                            "selection_metric": best_selection_metric,
                             "val_ssim": record["val/ssim"],
                             "val_masked_sam_deg": last_sam_deg,
+                            "val_proxy_bpppc": record["val/proxy_bpppc"],
                             "val_ref_bpppc": record["val/ref_bpppc"],
                             "val_likelihood_bpppc": record["val/likelihood_bpppc"],
                             "latent_shape": str(latent_shape),

@@ -95,9 +95,21 @@ class SSCNet(nn.Module):
         return False
 
     @property
-    def bpppc(self) -> float:
+    def proxy_bpppc(self) -> float:
         spatial_downsamplings = 3
-        compression_ratio = (self.in_channels / self.latent_channels) * (
-            2**spatial_downsamplings
-        ) ** 2
-        return 32.0 / compression_ratio
+        latent_h_over_input_h = 1 / (2**spatial_downsamplings)
+        latent_w_over_input_w = 1 / (2**spatial_downsamplings)
+        return (
+            self.latent_channels
+            / self.in_channels
+            * latent_h_over_input_h
+            * latent_w_over_input_w
+        )
+
+    @property
+    def bpppc(self) -> float:
+        return self.proxy_bpppc
+
+    @property
+    def float32_bpppc(self) -> float:
+        return 32.0 * self.proxy_bpppc
