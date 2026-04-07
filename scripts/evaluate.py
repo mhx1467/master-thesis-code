@@ -106,6 +106,15 @@ def evaluate_model(
     use_amp=False,
 ):
     model.eval()
+
+    def _get_proxy_bpppc(model_obj) -> float | None:
+        model_raw = model_obj.module if hasattr(model_obj, "module") else model_obj
+        proxy = getattr(model_raw, "proxy_bpppc", None)
+        if proxy is not None:
+            return float(proxy)
+        legacy = getattr(model_raw, "bpppc", None)
+        return float(legacy) if legacy is not None else None
+
     totals = {
         "loss": 0.0,
         "masked_mse": 0.0,
@@ -120,6 +129,7 @@ def evaluate_model(
         "sam_deg": 0.0,
         "sid": 0.0,
         "invalid_mae": 0.0,
+        "proxy_bpppc": 0.0,
         "ref_bpppc": 0.0,
         "likelihood_bpppc": 0.0,
         "actual_masked_mse": 0.0,
@@ -215,11 +225,10 @@ def evaluate_model(
         if likelihoods is not None:
             has_likelihoods = True
             totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
-        model_ref_bpppc = getattr(
-            model.module if hasattr(model, "module") else model, "bpppc", None
-        )
-        if model_ref_bpppc is not None:
-            totals["ref_bpppc"] += float(model_ref_bpppc)
+        model_proxy_bpppc = _get_proxy_bpppc(model)
+        if model_proxy_bpppc is not None:
+            totals["proxy_bpppc"] += model_proxy_bpppc
+            totals["ref_bpppc"] += model_proxy_bpppc
 
         if latent_shape is None and z is not None:
             latent_shape = tuple(z.shape[1:])
@@ -346,9 +355,10 @@ def evaluate_model(
             "actual_ssim",
         ):
             out[key] = None
-    out["ref_compression_ratio"] = compute_compression_ratio_from_bpppc(
-        out["ref_bpppc"], ORIGINAL_BITS_PER_CHANNEL
+    out["proxy_compression_ratio"] = compute_compression_ratio_from_bpppc(
+        out["proxy_bpppc"], ORIGINAL_BITS_PER_CHANNEL
     )
+    out["ref_compression_ratio"] = out["proxy_compression_ratio"]
     out["likelihood_compression_ratio"] = compute_compression_ratio_from_bpppc(
         out["likelihood_bpppc"], ORIGINAL_BITS_PER_CHANNEL
     )
@@ -459,10 +469,10 @@ def main():
     print(f"  PSNR:         {metrics['psnr']:.4f} dB")
     print(f"  SSIM:         {metrics['ssim']:.4f}")
     print(f"  SA:           {metrics['sam_deg']:.4f} °")
-    print(f"  bpppc(ref):   {metrics['ref_bpppc']:.6f}")
+    print(f"  proxy bpppc:  {metrics['proxy_bpppc']:.6f}")
     print(
-        f"  Ref. CR:      {metrics['ref_compression_ratio']:.4f}:1"
-        if metrics["ref_compression_ratio"] is not None
+        f"  Proxy CR:     {metrics['proxy_compression_ratio']:.4f}:1"
+        if metrics["proxy_compression_ratio"] is not None
         else "  Ref. CR:      n/a"
     )
     print(f"{'-' * 55}")
@@ -556,6 +566,8 @@ def main():
             "eval/ref_psnr": metrics["psnr"],
             "eval/ref_ssim": metrics["ssim"],
             "eval/ref_sa_deg": metrics["sam_deg"],
+            "eval/proxy_bpppc": metrics["proxy_bpppc"],
+            "eval/proxy_compression_ratio": metrics["proxy_compression_ratio"],
             "eval/ref_bpppc": metrics["ref_bpppc"],
             "eval/ref_compression_ratio": metrics["ref_compression_ratio"],
             "eval/likelihood_bpppc": metrics["likelihood_bpppc"],

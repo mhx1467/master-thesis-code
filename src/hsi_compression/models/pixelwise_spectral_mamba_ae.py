@@ -311,5 +311,9 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         )
 
     @property
-    def bpppc(self) -> float:
+    def proxy_bpppc(self) -> float:
         return self.latent_channels / self.in_channels
+
+    @property
+    def bpppc(self) -> float:
+        return self.proxy_bpppc

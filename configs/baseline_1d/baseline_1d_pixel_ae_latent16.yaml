@@ -1,11 +1,16 @@
 experiment:
-  name: baseline_2d_ae_rd_lambda_0_01
+  name: internal_baseline_1d_pixel_ae_latent16
   seed: 42
 
 data:
   difficulty: easy
   batch_size: 16
   num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  prefer_npy: true
+  npy_mmap: false
   drop_invalid_channels: true
   train_subset_size: null
   val_subset_size: null
@@ -14,11 +19,9 @@ training:
   use_amp: true
   epochs: 200
   lr: 0.0001
-  
   loss_name: rate_distortion
-  rd_lambda: 0.01          
+  rd_lambda: 0.01
   distortion_metric: masked_mse
-
   grad_clip_max_norm: 1.0
   scheduler:
     enabled: true
@@ -29,13 +32,15 @@ training:
     enabled: true
     patience: 50
     psnr_min_delta: 0.01
+  sam_every_n_epochs: 10
 
 model:
-  model_name: baseline_2d_ae
+  model_name: baseline_1d_pixel_ae
   model_kwargs:
     in_channels: 202
     latent_channels: 16
-    hidden_channels: [128, 64]
+    hidden_channels: 64
+    output_activation: sigmoid
 
 logging:
   use_wandb: true
