@@ -43,7 +43,7 @@ class SpatialConditionPath(nn.Module):
             embed_channels, context_channels, kernel_size=3, stride=2, padding=1, bias=False
         )
         self.conv3 = nn.Conv2d(
-            context_channels, context_channels, kernel_size=3, padding=1, bias=False
+            context_channels, context_channels, kernel_size=3, stride=2, padding=1, bias=False
         )
         self.act = nn.GELU()
 
@@ -71,6 +71,7 @@ class SpatialConditionPath(nn.Module):
 
         x = self.act(self.conv3(x))
         if mask is not None:
+            mask = F.max_pool2d(mask, kernel_size=2, stride=2)
             x = x * mask
 
         gamma = self.gamma(x)
