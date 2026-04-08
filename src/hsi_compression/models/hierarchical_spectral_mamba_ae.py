@@ -95,7 +95,8 @@ class LearnedSpectralTokenAggregator(nn.Module):
         scores = torch.einsum("kd,ntd->nkt", self.query, tokens)
 
         if mask is not None:
-            scores = scores.masked_fill(mask.unsqueeze(1) == 0, -1e9)
+            mask_fill = torch.finfo(scores.dtype).min
+            scores = scores.masked_fill(mask.unsqueeze(1) == 0, mask_fill)
 
         attn = torch.softmax(scores, dim=-1)
         summary = torch.einsum("nkt,ntd->nkd", attn, tokens)
