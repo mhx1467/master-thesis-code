@@ -94,6 +94,7 @@ def build_hierarchical_spectral_mamba_ae(in_channels: int, **kwargs):
         mamba_d_conv=kwargs.get("mamba_d_conv", 4),
         mamba_expand=kwargs.get("mamba_expand", 2),
         use_affine_conditioning=kwargs.get("use_affine_conditioning", True),
+        spectral_chunk_size=kwargs.get("spectral_chunk_size", 512),
         output_activation=kwargs.get("output_activation", "sigmoid"),
         dropout=kwargs.get("dropout", 0.0),
     )

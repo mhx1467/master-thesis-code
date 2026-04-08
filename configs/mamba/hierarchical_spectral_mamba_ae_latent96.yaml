@@ -4,7 +4,7 @@ experiment:
 
 data:
   difficulty: easy
-  batch_size: 16
+  batch_size: 4
   num_workers: 4
   pin_memory: true
   persistent_workers: true
@@ -50,6 +50,7 @@ model:
     mamba_d_conv: 4
     mamba_expand: 2
     use_affine_conditioning: true
+    spectral_chunk_size: 512
     output_activation: sigmoid
     dropout: 0.0
 
