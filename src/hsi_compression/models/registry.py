@@ -2,6 +2,7 @@ from hsi_compression.models import (
     Baseline1DPixelAutoencoder,
     Baseline2DAutoencoder,
     Baseline3DPatchAutoencoder,
+    HierarchicalSpectralMambaAutoencoder,
     Hybrid2D3DAutoencoderLIC,
     SpectralMambaAutoencoder,
     SSCNet,
@@ -76,6 +77,28 @@ def build_spectral_mamba_ae(in_channels: int, **kwargs):
     )
 
 
+def build_hierarchical_spectral_mamba_ae(in_channels: int, **kwargs):
+    return HierarchicalSpectralMambaAutoencoder(
+        in_channels=in_channels,
+        latent_channels=kwargs.get("latent_channels", 96),
+        group_size=kwargs.get("group_size", 4),
+        spectral_d_model=kwargs.get("spectral_d_model", 64),
+        spectral_mlp_hidden_dim=kwargs.get("spectral_mlp_hidden_dim", 128),
+        spectral_out_channels=kwargs.get("spectral_out_channels", 96),
+        num_summary_tokens=kwargs.get("num_summary_tokens", 4),
+        num_local_blocks=kwargs.get("num_local_blocks", 2),
+        num_global_blocks=kwargs.get("num_global_blocks", 1),
+        spatial_embed_channels=kwargs.get("spatial_embed_channels", 16),
+        spatial_context_channels=kwargs.get("spatial_context_channels", 64),
+        mamba_d_state=kwargs.get("mamba_d_state", 16),
+        mamba_d_conv=kwargs.get("mamba_d_conv", 4),
+        mamba_expand=kwargs.get("mamba_expand", 2),
+        use_affine_conditioning=kwargs.get("use_affine_conditioning", True),
+        output_activation=kwargs.get("output_activation", "sigmoid"),
+        dropout=kwargs.get("dropout", 0.0),
+    )
+
+
 def build_sscnet(in_channels: int, **kwargs):
     return SSCNet(
         in_channels=in_channels,
@@ -89,6 +112,7 @@ MODEL_REGISTRY = {
     "baseline_2d_patch_ae": build_baseline_2d_patch_ae,
     "baseline_2d_patch_ae_lic": build_baseline_2d_patch_ae_lic,
     "baseline_3d_patch_ae": build_baseline_3d_patch_ae,
+    "hierarchical_spectral_mamba_ae": build_hierarchical_spectral_mamba_ae,
     "hybrid_2d3d_ae_lic": build_hybrid_2d3d_ae_lic,
     "sscnet": build_sscnet,
     "spectral_mamba_ae": build_spectral_mamba_ae,
