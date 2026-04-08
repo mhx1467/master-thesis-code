@@ -260,6 +260,8 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
             return None
 
         mask_pix = rearrange(mask, "b c h w -> (b h w) c")
+        if self.pad_bands > 0 and mask_pix.shape[1] > 1:
+            mask_pix = F.pad(mask_pix, (0, self.pad_bands), mode="constant", value=0.0)
         if mask_pix.shape[1] == 1 and self.num_tokens > 1:
             return mask_pix.expand(-1, self.num_tokens)
         if mask_pix.shape[1] > 1 and self.group_size > 1:
