@@ -129,6 +129,7 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
         mamba_d_conv: int = 4,
         mamba_expand: int = 2,
         use_affine_conditioning: bool = True,
+        spectral_chunk_size: int | None = 512,
         output_activation: str | None = "sigmoid",
         dropout: float = 0.0,
     ):
@@ -144,6 +145,7 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
         self.spectral_d_model = spectral_d_model
         self.spectral_out_channels = spectral_out_channels
         self.num_summary_tokens = num_summary_tokens
+        self.spectral_chunk_size = spectral_chunk_size
 
         self.c_pad = int(math.ceil(in_channels / group_size) * group_size)
         self.pad_bands = self.c_pad - in_channels
@@ -264,6 +266,24 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
             return rearrange(mask_pix, "n (t g) -> n t g", g=self.group_size).amax(dim=-1)
         return mask_pix
 
+    def _encode_token_chunk(
+        self, h_tok: torch.Tensor, mask_tok: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        for block in self.local_blocks:
+            h_tok = block["mamba"](h_tok)
+            h_tok = block["mlp"](h_tok)
+
+        summary, attn = self.summary_aggregator(h_tok, mask=mask_tok)
+
+        for block in self.global_blocks:
+            summary = block["mamba"](summary)
+            summary = block["mlp"](summary)
+
+        summary = self.summary_norm(summary)
+        summary = rearrange(summary, "n k d -> n (k d)")
+        feat = self.summary_to_grid(summary)
+        return feat, attn
+
     def _spectral_encode_grid(
         self, x: torch.Tensor, mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -276,20 +296,21 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
         tokens = rearrange(x_pix, "n (t g) -> n t g", g=self.group_size)
         h_tok = self.token_embed(tokens) + self.pos_embed
 
-        for block in self.local_blocks:
-            h_tok = block["mamba"](h_tok)
-            h_tok = block["mlp"](h_tok)
-
         mask_tok = self._spectral_token_mask(mask)
-        summary, attn = self.summary_aggregator(h_tok, mask=mask_tok)
+        chunk_size = self.spectral_chunk_size or h_tok.shape[0]
 
-        for block in self.global_blocks:
-            summary = block["mamba"](summary)
-            summary = block["mlp"](summary)
+        feat_chunks = []
+        attn_chunks = []
+        for start in range(0, h_tok.shape[0], chunk_size):
+            end = start + chunk_size
+            h_chunk = h_tok[start:end]
+            mask_chunk = mask_tok[start:end] if mask_tok is not None else None
+            feat_chunk, attn_chunk = self._encode_token_chunk(h_chunk, mask_chunk)
+            feat_chunks.append(feat_chunk)
+            attn_chunks.append(attn_chunk)
 
-        summary = self.summary_norm(summary)
-        summary = rearrange(summary, "n k d -> n (k d)")
-        feat = self.summary_to_grid(summary)
+        feat = torch.cat(feat_chunks, dim=0)
+        attn = torch.cat(attn_chunks, dim=0)
         feat = rearrange(feat, "(b h w) c -> b c h w", b=b, h=h, w=w)
         return feat, attn
 
