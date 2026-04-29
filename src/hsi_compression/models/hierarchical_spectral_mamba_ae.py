@@ -130,6 +130,7 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
         mamba_d_state: int = 16,
         mamba_d_conv: int = 4,
         mamba_expand: int = 2,
+        use_spatial_conditioning: bool = True,
         use_affine_conditioning: bool = True,
         spectral_chunk_size: int | None = 512,
         output_activation: str | None = "sigmoid",
@@ -148,6 +149,7 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
         self.spectral_out_channels = spectral_out_channels
         self.num_summary_tokens = num_summary_tokens
         self.spectral_chunk_size = spectral_chunk_size
+        self.use_spatial_conditioning = use_spatial_conditioning
 
         self.c_pad = int(math.ceil(in_channels / group_size) * group_size)
         self.pad_bands = self.c_pad - in_channels
@@ -217,12 +219,16 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
             nn.GELU(),
         )
 
-        self.spatial_condition = SpatialConditionPath(
-            in_channels=in_channels,
-            embed_channels=spatial_embed_channels,
-            context_channels=spatial_context_channels,
-            target_channels=spectral_out_channels,
-            use_affine_conditioning=use_affine_conditioning,
+        self.spatial_condition = (
+            SpatialConditionPath(
+                in_channels=in_channels,
+                embed_channels=spatial_embed_channels,
+                context_channels=spatial_context_channels,
+                target_channels=spectral_out_channels,
+                use_affine_conditioning=use_affine_conditioning,
+            )
+            if use_spatial_conditioning
+            else None
         )
 
         self.encoder_to_latent = nn.Conv2d(spectral_out_channels, latent_channels, kernel_size=1)
@@ -320,7 +326,18 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
 
     def encode(self, x: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
         mask_float = valid_mask.float() if valid_mask is not None else None
-        gamma, beta = self.spatial_condition(x, mask=mask_float)
+        if self.spatial_condition is not None:
+            gamma, beta = self.spatial_condition(x, mask=mask_float)
+        else:
+            gamma = torch.zeros(
+                x.shape[0],
+                self.spectral_out_channels,
+                x.shape[-2] // 4,
+                x.shape[-1] // 4,
+                device=x.device,
+                dtype=x.dtype,
+            )
+            beta = None
 
         x_low = F.avg_pool2d(x, kernel_size=2, stride=2)
         mask_low = None
@@ -343,7 +360,18 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
         self, x: torch.Tensor, valid_mask: torch.Tensor | None = None
     ) -> dict[str, torch.Tensor]:
         mask_float = valid_mask.float() if valid_mask is not None else None
-        gamma, beta = self.spatial_condition(x, mask=mask_float)
+        if self.spatial_condition is not None:
+            gamma, beta = self.spatial_condition(x, mask=mask_float)
+        else:
+            gamma = torch.zeros(
+                x.shape[0],
+                self.spectral_out_channels,
+                x.shape[-2] // 4,
+                x.shape[-1] // 4,
+                device=x.device,
+                dtype=x.dtype,
+            )
+            beta = None
 
         x_low = F.avg_pool2d(x, kernel_size=2, stride=2)
         mask_low = None
