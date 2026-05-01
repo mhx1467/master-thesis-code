@@ -1,0 +1,60 @@
+experiment:
+  name: hierarchical_spectral_mamba_ae_stage1_recommended_recon_latent96
+  seed: 42
+
+data:
+  difficulty: easy
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  prefer_npy: true
+  npy_mmap: false
+  debug_loader_timing: false
+  drop_invalid_channels: true
+  train_subset_size: null
+  val_subset_size: null
+
+training:
+  use_amp: true
+  epochs: 200
+  lr: 0.0001
+  loss_name: masked_mse
+  grad_clip_max_norm: 1.0
+  scheduler:
+    enabled: true
+    name: cosine
+    T_max: 200
+    eta_min: 1.0e-06
+  early_stopping:
+    enabled: true
+    patience: 40
+    psnr_min_delta: 0.01
+
+model:
+  model_name: hierarchical_spectral_mamba_ae
+  model_kwargs:
+    in_channels: 202
+    latent_channels: 96
+    group_size: 4
+    spectral_d_model: 64
+    spectral_mlp_hidden_dim: 128
+    spectral_out_channels: 96
+    num_summary_tokens: 4
+    num_local_blocks: 2
+    num_global_blocks: 1
+    spatial_embed_channels: 16
+    spatial_context_channels: 64
+    mamba_d_state: 16
+    mamba_d_conv: 4
+    mamba_expand: 2
+    use_spatial_conditioning: false
+    use_affine_conditioning: false
+    spectral_chunk_size: 512
+    output_activation: sigmoid
+    dropout: 0.0
+
+logging:
+  use_wandb: true
+  project: hsi-compression-paper
