@@ -4,7 +4,6 @@ from .baseline_3d_patch_ae import Baseline3DPatchAutoencoder
 from .hierarchical_spectral_mamba_ae import HierarchicalSpectralMambaAutoencoder
 from .hybrid_2d3d_ae_lic import Hybrid2D3DAutoencoderLIC
 from .spectral_first_mamba_ae_v2 import SpectralFirstMambaAutoencoderV2
-from .sscnet import SSCNet
 
 SpectralMambaAutoencoder = SpectralFirstMambaAutoencoderV2
 
@@ -14,7 +13,6 @@ __all__ = [
     "Baseline3DPatchAutoencoder",
     "HierarchicalSpectralMambaAutoencoder",
     "Hybrid2D3DAutoencoderLIC",
-    "SSCNet",
     "SpectralMambaAutoencoder",
     "SpectralFirstMambaAutoencoderV2",
 ]

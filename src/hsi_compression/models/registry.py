@@ -5,7 +5,6 @@ from hsi_compression.models import (
     HierarchicalSpectralMambaAutoencoder,
     Hybrid2D3DAutoencoderLIC,
     SpectralMambaAutoencoder,
-    SSCNet,
 )
 
 
@@ -100,13 +99,6 @@ def build_hierarchical_spectral_mamba_ae(in_channels: int, **kwargs):
     )
 
 
-def build_sscnet(in_channels: int, **kwargs):
-    return SSCNet(
-        in_channels=in_channels,
-        latent_channels=kwargs.get("latent_channels", 1024),
-    )
-
-
 MODEL_REGISTRY = {
     "baseline_1d_pixel_ae": build_baseline_1d_pixel_ae,
     "baseline_2d_ae": build_baseline_2d_ae,
@@ -115,7 +107,6 @@ MODEL_REGISTRY = {
     "baseline_3d_patch_ae": build_baseline_3d_patch_ae,
     "hierarchical_spectral_mamba_ae": build_hierarchical_spectral_mamba_ae,
     "hybrid_2d3d_ae_lic": build_hybrid_2d3d_ae_lic,
-    "sscnet": build_sscnet,
     "spectral_mamba_ae": build_spectral_mamba_ae,
     "spectral_first_mamba_ae_v2": build_spectral_mamba_ae,
 }
