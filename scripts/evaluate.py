@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -150,8 +151,12 @@ def evaluate_model(
     latent_shape = None
     has_likelihoods = False
     actual_available = False
+    actual_mismatch_count = 0
+    actual_max_abs_error = 0.0
 
     inference_times = []
+    encode_times_ms = []
+    decode_times_ms = []
     if device.type == "cuda":
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
@@ -241,9 +246,22 @@ def evaluate_model(
             )
         )
         if supports_actual:
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            encode_start = time.perf_counter()
             packed = _call_model_compress(model, x, mask)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            encode_times_ms.append((time.perf_counter() - encode_start) * 1000.0)
             _validate_packed_output(packed)
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            decode_start = time.perf_counter()
             decoded = _call_model_decompress(model, packed, mask)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            decode_times_ms.append((time.perf_counter() - decode_start) * 1000.0)
 
             if not isinstance(decoded, dict) or "x_hat" not in decoded:
                 raise RuntimeError("model.decompress() must return a dict containing 'x_hat'")
@@ -278,6 +296,11 @@ def evaluate_model(
             ).item()
             totals["actual_mse"] += torch.mean((x_hat_actual - x) ** 2).item()
             totals["actual_mae"] += mae(x_hat_actual, x).item()
+            actual_mismatch_count += int((x_hat_actual != x).sum().item())
+            actual_max_abs_error = max(
+                actual_max_abs_error,
+                float((x_hat_actual - x).abs().max().item()),
+            )
 
             with torch.no_grad():
                 B, C, H, W = x.shape
@@ -365,6 +388,9 @@ def evaluate_model(
     out["actual_compression_ratio"] = compute_compression_ratio_from_bpppc(
         out["actual_bpppc"], ORIGINAL_BITS_PER_CHANNEL
     )
+    out["actual_exact_reconstruction"] = actual_mismatch_count == 0 if actual_available else None
+    out["actual_mismatch_count"] = actual_mismatch_count if actual_available else None
+    out["actual_max_abs_error"] = actual_max_abs_error if actual_available else None
 
     if len(inference_times) > 5:
         out["inference_ms_per_batch"] = sum(inference_times[5:]) / len(inference_times[5:])
@@ -372,6 +398,12 @@ def evaluate_model(
         out["inference_ms_per_batch"] = sum(inference_times) / len(inference_times)
     else:
         out["inference_ms_per_batch"] = 0.0
+    out["encode_ms_per_batch"] = (
+        sum(encode_times_ms) / len(encode_times_ms) if encode_times_ms else None
+    )
+    out["decode_ms_per_batch"] = (
+        sum(decode_times_ms) / len(decode_times_ms) if decode_times_ms else None
+    )
 
     return out
 
@@ -525,9 +557,34 @@ def main():
         if metrics["actual_compression_ratio"] is not None
         else "  Actual CR:    n/a"
     )
+    print(
+        f"  Exact Recon:  {metrics['actual_exact_reconstruction']}"
+        if metrics["actual_exact_reconstruction"] is not None
+        else "  Exact Recon:  n/a"
+    )
+    print(
+        f"  Mismatches:   {metrics['actual_mismatch_count']}"
+        if metrics["actual_mismatch_count"] is not None
+        else "  Mismatches:   n/a"
+    )
+    print(
+        f"  Max |err|:    {metrics['actual_max_abs_error']:.8f}"
+        if metrics["actual_max_abs_error"] is not None
+        else "  Max |err|:    n/a"
+    )
     print(f"{'-' * 55}")
     print(f"  Latent:       {metrics['latent_shape']}")
     print(f"  Infer Time:   {metrics['inference_ms_per_batch']:.2f} ms / batch")
+    print(
+        f"  Encode Time:  {metrics['encode_ms_per_batch']:.2f} ms / batch"
+        if metrics["encode_ms_per_batch"] is not None
+        else "  Encode Time:  n/a"
+    )
+    print(
+        f"  Decode Time:  {metrics['decode_ms_per_batch']:.2f} ms / batch"
+        if metrics["decode_ms_per_batch"] is not None
+        else "  Decode Time:  n/a"
+    )
     print(f"{'=' * 55}\n")
 
     result = {
@@ -593,7 +650,12 @@ def main():
             "eval/actual_invalid_mae": metrics["actual_invalid_mae"],
             "eval/actual_bpppc": metrics["actual_bpppc"],
             "eval/actual_compression_ratio": metrics["actual_compression_ratio"],
+            "eval/actual_exact_reconstruction": metrics["actual_exact_reconstruction"],
+            "eval/actual_mismatch_count": metrics["actual_mismatch_count"],
+            "eval/actual_max_abs_error": metrics["actual_max_abs_error"],
             "eval/inference_ms_per_batch": metrics["inference_ms_per_batch"],
+            "eval/encode_ms_per_batch": metrics["encode_ms_per_batch"],
+            "eval/decode_ms_per_batch": metrics["decode_ms_per_batch"],
         }
         with init_wandb(
             project="hsi-compression-paper",
