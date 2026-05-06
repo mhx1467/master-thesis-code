@@ -5,6 +5,7 @@ from hsi_compression.models import (
     HierarchicalSpectralMambaAutoencoder,
     Hybrid2D3DAutoencoderLIC,
     SpectralMambaAutoencoder,
+    SpectralTCNLossless,
 )
 
 
@@ -99,6 +100,20 @@ def build_hierarchical_spectral_mamba_ae(in_channels: int, **kwargs):
     )
 
 
+def build_spectral_tcn_lossless(in_channels: int, **kwargs):
+    return SpectralTCNLossless(
+        in_channels=in_channels,
+        hidden_channels=kwargs.get("hidden_channels", 48),
+        num_blocks=kwargs.get("num_blocks", 6),
+        kernel_size=kwargs.get("kernel_size", 3),
+        dropout=kwargs.get("dropout", 0.0),
+        output_activation=kwargs.get("output_activation", "sigmoid"),
+        symbol_scale=kwargs.get("symbol_scale", 10000),
+        zlib_level=kwargs.get("zlib_level", 9),
+        raw_fallback=kwargs.get("raw_fallback", True),
+    )
+
+
 MODEL_REGISTRY = {
     "baseline_1d_pixel_ae": build_baseline_1d_pixel_ae,
     "baseline_2d_ae": build_baseline_2d_ae,
@@ -107,6 +122,7 @@ MODEL_REGISTRY = {
     "baseline_3d_patch_ae": build_baseline_3d_patch_ae,
     "hierarchical_spectral_mamba_ae": build_hierarchical_spectral_mamba_ae,
     "hybrid_2d3d_ae_lic": build_hybrid_2d3d_ae_lic,
+    "spectral_tcn_lossless": build_spectral_tcn_lossless,
     "spectral_mamba_ae": build_spectral_mamba_ae,
     "spectral_first_mamba_ae_v2": build_spectral_mamba_ae,
 }
