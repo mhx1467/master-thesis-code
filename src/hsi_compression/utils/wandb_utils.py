@@ -3,7 +3,13 @@ import os
 import wandb
 
 
-def init_wandb(project: str, run_name: str, config: dict):
+def init_wandb(
+    project: str,
+    run_name: str,
+    config: dict,
+    run_id: str | None = None,
+    resume: str | None = None,
+):
     api_key = os.environ.get("WANDB_API_KEY")
 
     if api_key is None:
@@ -16,6 +22,8 @@ def init_wandb(project: str, run_name: str, config: dict):
         project=project,
         name=run_name,
         config=config,
+        id=run_id,
+        resume=resume or ("allow" if run_id is not None else None),
     )
 
     return run

@@ -29,6 +29,19 @@ def parse_args():
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--disable-wandb", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+    parser.add_argument(
+        "--wandb-run-id",
+        type=str,
+        default=None,
+        help="Resume logging into an existing W&B run id.",
+    )
+    parser.add_argument(
+        "--wandb-resume",
+        type=str,
+        default=None,
+        choices=("allow", "must", "never", "auto"),
+        help="W&B resume mode. Defaults to 'allow' when --wandb-run-id is provided.",
+    )
 
     parser.add_argument(
         "--pretrained",
@@ -311,7 +324,13 @@ def main():
     if use_wandb:
         project = logging_cfg.get("project", "hsi-compression-paper")
         run_name = args.run_name or exp_name
-        with init_wandb(project=project, run_name=run_name, config=run_cfg) as run:
+        with init_wandb(
+            project=project,
+            run_name=run_name,
+            config=run_cfg,
+            run_id=args.wandb_run_id,
+            resume=args.wandb_resume,
+        ) as run:
             _run(logger=run)
     else:
         _run(logger=None)
