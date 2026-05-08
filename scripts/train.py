@@ -63,6 +63,12 @@ def parse_args():
         type=int,
         default=None,
     )
+    parser.add_argument(
+        "--override-experiment-name",
+        type=str,
+        default=None,
+        help="Override experiment.name, including checkpoint basename.",
+    )
 
     return parser.parse_args()
 
@@ -79,6 +85,8 @@ def main():
     logging_cfg = cfg.get("logging", {})
     seed = experiment_cfg.get("seed", 42)
 
+    if args.override_experiment_name is not None:
+        experiment_cfg["name"] = args.override_experiment_name
     if args.override_rd_lambda is not None:
         training_cfg["rd_lambda"] = args.override_rd_lambda
     if args.override_lr is not None:
@@ -86,6 +94,7 @@ def main():
     if args.override_epochs is not None:
         training_cfg["epochs"] = args.override_epochs
 
+    cfg["experiment"] = experiment_cfg
     cfg["training"] = training_cfg
 
     dataset_root = Path(
