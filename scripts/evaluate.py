@@ -97,6 +97,12 @@ def _validate_packed_output(packed: dict):
         raise RuntimeError("model.compress() returned strings=None")
 
 
+def _safe_filename_stem(value: str) -> str:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    stem = "".join(ch if ch in allowed else "_" for ch in value).strip("._-")
+    return stem or "eval"
+
+
 @torch.no_grad()
 def evaluate_model(
     model,
@@ -600,7 +606,11 @@ def main():
     }
 
     if args.save_json:
-        out = logs_dir() / f"eval_{model_name}_{difficulty}_{args.split}.json"
+        if args.run_name:
+            filename_stem = _safe_filename_stem(args.run_name)
+        else:
+            filename_stem = f"eval_{model_name}_{difficulty}_{args.split}"
+        out = logs_dir() / f"{filename_stem}.json"
         with open(out, "w", encoding="utf-8") as f:
             json.dump(
                 {
