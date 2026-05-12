@@ -145,7 +145,8 @@ class SpectralTCNLossless(nn.Module):
         x_float = x.detach().float()
         symbols = self._to_symbols(x_float)
 
-        if self.raw_fallback and not self._is_exact_symbol_grid(x_float, symbols):
+        is_exact_symbol_grid = self._is_exact_symbol_grid(x_float, symbols)
+        if self.raw_fallback and not is_exact_symbol_grid:
             strings = self._pack_array(
                 header={
                     "compression_mode": self.compression_mode,
@@ -156,6 +157,12 @@ class SpectralTCNLossless(nn.Module):
                 array=np.ascontiguousarray(x_float.cpu().numpy().astype(np.float32)),
             )
             return {"strings": strings, "shape": tuple(x.shape)}
+        if not is_exact_symbol_grid:
+            raise ValueError(
+                "Input is not exactly representable on the configured symbol grid "
+                f"(symbol_scale={self.symbol_scale}). Enable raw_fallback for exact "
+                "float32 coding or use symbol-grid inputs for predictive residual coding."
+            )
 
         predicted = self._predict_from_target_symbols(symbols)
         predicted_symbols = self._to_symbols(predicted)
@@ -163,7 +170,7 @@ class SpectralTCNLossless(nn.Module):
 
         residual_min = int(residuals.min().item())
         residual_max = int(residuals.max().item())
-        residual_dtype = np.int16 if -32768 <= residual_min and residual_max <= 32767 else np.int32
+        residual_dtype = np.int16 if residual_min >= -32768 and residual_max <= 32767 else np.int32
         residual_array = np.ascontiguousarray(residuals.cpu().numpy().astype(residual_dtype))
 
         strings = self._pack_array(
@@ -237,13 +244,16 @@ class SpectralTCNLossless(nn.Module):
         teacher_t = torch.zeros(num_pixels, device=device, dtype=torch.float32)
 
         states = [
-            block.init_state(num_pixels, device=device, dtype=torch.float32) for block in self.blocks
+            block.init_state(num_pixels, device=device, dtype=torch.float32)
+            for block in self.blocks
         ]
 
         for band_idx in range(c):
             predicted_t, states = self._predict_step(teacher_t, states)
             predicted_symbols = self._to_symbols(predicted_t)
-            decoded_t = (predicted_symbols + residuals_flat[:, band_idx]).clamp(0, self.symbol_scale)
+            decoded_t = (predicted_symbols + residuals_flat[:, band_idx]).clamp(
+                0, self.symbol_scale
+            )
             decoded_flat[:, band_idx] = decoded_t
             teacher_t = decoded_t.to(torch.float32) / self.symbol_scale
 

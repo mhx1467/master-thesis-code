@@ -25,6 +25,9 @@ dependencies = [
 mamba = [
     "mamba-ssm>=2.3.1",
 ]
+lossless = [
+    "zstandard>=0.22.0",
+]
 dev = [
     "ruff>=0.2.1",
 ]

@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from hsi_compression.models.registry import build_model
@@ -29,3 +30,18 @@ def test_spectral_tcn_lossless_raw_float_fallback_is_exact():
     decoded = model.decompress(packed["strings"], packed["shape"])
 
     assert torch.equal(decoded["x_hat"], x)
+
+
+def test_spectral_tcn_lossless_requires_symbol_grid_without_raw_fallback():
+    model = build_model(
+        "spectral_tcn_lossless",
+        in_channels=6,
+        hidden_channels=8,
+        num_blocks=2,
+        raw_fallback=False,
+    )
+    x = torch.rand(1, 6, 2, 2, dtype=torch.float32)
+    x[0, 0, 0, 0] = 0.12345679
+
+    with pytest.raises(ValueError, match="not exactly representable"):
+        model.compress(x)
