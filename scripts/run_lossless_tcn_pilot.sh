@@ -20,6 +20,7 @@ mkdir -p "$OUT_DIR"
 python scripts/audit_lossless_tcn_protocol.py \
   "$DATASET_ROOT" \
   --config "$CONFIG" \
+  --source tif \
   --split test \
   --difficulty easy \
   --num-samples 4 \
@@ -37,7 +38,7 @@ python scripts/evaluate_lossless_codecs.py \
   "$DATASET_ROOT" \
   --config "$CONFIG" \
   --checkpoint "$CHECKPOINT" \
-  --source data_npy \
+  --source tif \
   --split test \
   --difficulty easy \
   --num-samples "$NUM_EVAL_SAMPLES" \
@@ -50,6 +51,7 @@ python scripts/audit_lossless_tcn_protocol.py \
   "$DATASET_ROOT" \
   --config "$CONFIG" \
   --checkpoint "$CHECKPOINT" \
+  --source tif \
   --split test \
   --difficulty easy \
   --num-samples 32 \

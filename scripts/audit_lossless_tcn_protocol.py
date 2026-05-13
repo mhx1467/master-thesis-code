@@ -13,7 +13,9 @@ from typing import Any
 
 import torch
 
+from hsi_compression.constants import NODATA_VALUE, WATER_VAPOR_BANDS
 from hsi_compression.data import build_dataset
+from hsi_compression.datasets import HSITiffDataset
 from hsi_compression.engine.checkpointing import load_checkpoint
 from hsi_compression.metrics import (
     compute_actual_bpppc_from_strings,
@@ -21,6 +23,7 @@ from hsi_compression.metrics import (
 )
 from hsi_compression.models.registry import build_model
 from hsi_compression.paths import logs_dir
+from hsi_compression.splits import load_split_csv, split_csv_path
 from hsi_compression.utils import load_config, load_project_env
 
 DEFAULT_CONFIG = Path("configs/tcn/spectral_tcn_lossless_symbol_grid.yaml")
@@ -39,6 +42,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--split", default="test", choices=["train", "val", "test"])
     parser.add_argument("--difficulty", default=None, choices=["easy", "hard"])
+    parser.add_argument(
+        "--source",
+        default="data_npy",
+        choices=("data_npy", "tif"),
+        help=(
+            "data_npy uses benchmark DATA.npy split entries; tif maps split entries to "
+            "sibling *-SPECTRAL_IMAGE.TIF files and applies repository preprocessing."
+        ),
+    )
+    parser.add_argument(
+        "--allow-missing-split-entries",
+        action="store_true",
+        help="Filter missing TIF split paths instead of failing. Use only for local partial copies.",
+    )
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--save-json", type=Path, default=None)
@@ -54,6 +71,69 @@ def parse_args() -> argparse.Namespace:
         help="Reference source precision used for compression ratio reporting.",
     )
     return parser.parse_args()
+
+
+def split_entry_to_tif_path(dataset_root: Path, rel_entry: str) -> Path:
+    rel = Path(rel_entry)
+    patch_id = rel.stem.removesuffix("-DATA")
+    return dataset_root / "patches" / rel.parent / f"{patch_id}-SPECTRAL_IMAGE.TIF"
+
+
+def resolve_tif_split_paths(
+    dataset_root: Path,
+    split: str,
+    difficulty: str,
+    allow_missing: bool,
+) -> tuple[list[Path], int]:
+    csv_path = split_csv_path(dataset_root, split, difficulty)
+    paths = [split_entry_to_tif_path(dataset_root, entry) for entry in load_split_csv(csv_path)]
+    missing = [path for path in paths if not path.exists()]
+    if missing and not allow_missing:
+        raise FileNotFoundError(
+            f"{len(missing)} TIF files do not exist. First missing: {missing[0]}"
+        )
+    if allow_missing:
+        paths = [path for path in paths if path.exists()]
+    if not paths:
+        raise RuntimeError("No usable TIF samples after resolving split paths.")
+    return paths, len(missing)
+
+
+def build_audit_dataset(
+    dataset_root: Path,
+    source: str,
+    split: str,
+    difficulty: str,
+    allow_missing: bool,
+    data_cfg: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    if source == "data_npy":
+        dataset = build_dataset(
+            dataset_root=dataset_root,
+            split_name=split,
+            difficulty=difficulty,
+            return_mask=True,
+            drop_invalid_channels=data_cfg.get("drop_invalid_channels", True),
+            prefer_npy=True,
+            npy_mmap=data_cfg.get("npy_mmap", False),
+        )
+        return dataset, {"missing_split_entries": 0}
+
+    paths, missing = resolve_tif_split_paths(
+        dataset_root=dataset_root,
+        split=split,
+        difficulty=difficulty,
+        allow_missing=allow_missing,
+    )
+    dataset = HSITiffDataset(
+        paths=paths,
+        nodata_value=NODATA_VALUE,
+        invalid_channels=WATER_VAPOR_BANDS,
+        drop_invalid_channels=data_cfg.get("drop_invalid_channels", True),
+        prefer_npy=False,
+        return_mask=True,
+    )
+    return dataset, {"missing_split_entries": missing}
 
 
 def select_device(requested: str) -> torch.device:
@@ -132,7 +212,17 @@ def audit_sample(
 
     sync_if_cuda(device)
     encode_start = time.perf_counter()
-    packed = model.compress(x, valid_mask=mask)
+    try:
+        packed = model.compress(x, valid_mask=mask)
+    except ValueError as exc:
+        if "not exactly representable on the configured symbol grid" in str(exc):
+            raise ValueError(
+                "The selected input source is not exactly representable on the configured "
+                "symbol grid. For the primary lossless-symbol-grid protocol, rerun with "
+                "--source tif or generate exact symbol-grid DATA.npy artifacts. Do not enable "
+                "raw_fallback for TCN residual claims."
+            ) from exc
+        raise
     sync_if_cuda(device)
     encode_ms = (time.perf_counter() - encode_start) * 1000.0
 
@@ -238,6 +328,7 @@ def print_report(report: dict[str, Any]) -> None:
     summary = report["summary"]
     print("Spectral TCN lossless protocol audit")
     print(f"Dataset: {report['dataset_root']}")
+    print(f"Source: {report['source']}")
     print(f"Split: {report['difficulty']}/{report['split']}")
     print(f"Checkpoint: {report['checkpoint'] or 'none'}")
     print(f"Samples audited: {summary['num_samples']}")
@@ -269,14 +360,13 @@ def main() -> int:
     data_cfg = config.get("data", {})
     difficulty = args.difficulty or data_cfg.get("difficulty", "easy")
 
-    dataset = build_dataset(
+    dataset, dataset_meta = build_audit_dataset(
         dataset_root=dataset_root,
-        split_name=args.split,
+        source=args.source,
+        split=args.split,
         difficulty=difficulty,
-        return_mask=True,
-        drop_invalid_channels=data_cfg.get("drop_invalid_channels", True),
-        prefer_npy=data_cfg.get("prefer_npy", True),
-        npy_mmap=data_cfg.get("npy_mmap", False),
+        allow_missing=args.allow_missing_split_entries,
+        data_cfg=data_cfg,
     )
 
     if len(dataset) == 0:
@@ -314,11 +404,13 @@ def main() -> int:
         "dataset_root": str(dataset_root),
         "config": str(args.config),
         "checkpoint": str(checkpoint_path) if checkpoint_path else None,
+        "source": args.source,
         "split": args.split,
         "difficulty": difficulty,
         "device": str(device),
         "in_channels": in_channels,
         "original_bits_per_channel": args.original_bits_per_channel,
+        "dataset_meta": dataset_meta,
         "summary": summary,
         "samples": sample_reports,
     }
