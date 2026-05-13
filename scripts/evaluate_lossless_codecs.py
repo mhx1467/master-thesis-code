@@ -661,8 +661,7 @@ def run_tcn_residual_codec(
     sync_if_cuda(device)
     start = time.perf_counter()
     with torch.no_grad():
-        predicted = model._predict_from_target_symbols(symbols)  # noqa: SLF001
-        predicted_symbols = model._to_symbols(predicted)  # noqa: SLF001
+        predicted_symbols = model._predict_symbols_sequential_from_symbols(symbols)  # noqa: SLF001
         residuals = (symbols - predicted_symbols).to(torch.int32)
     sync_if_cuda(device)
 

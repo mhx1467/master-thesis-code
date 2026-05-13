@@ -164,8 +164,7 @@ class SpectralTCNLossless(nn.Module):
                 "float32 coding or use symbol-grid inputs for predictive residual coding."
             )
 
-        predicted = self._predict_from_target_symbols(symbols)
-        predicted_symbols = self._to_symbols(predicted)
+        predicted_symbols = self._predict_symbols_sequential_from_symbols(symbols)
         residuals = (symbols - predicted_symbols).to(torch.int32)
 
         residual_min = int(residuals.min().item())
@@ -258,6 +257,27 @@ class SpectralTCNLossless(nn.Module):
             teacher_t = decoded_t.to(torch.float32) / self.symbol_scale
 
         return decoded_flat.reshape(n, h, w, c).permute(0, 3, 1, 2).contiguous()
+
+    def _predict_symbols_sequential_from_symbols(self, symbols: torch.Tensor) -> torch.Tensor:
+        n, c, h, w = symbols.shape
+        num_pixels = n * h * w
+        device = symbols.device
+
+        symbols_flat = symbols.permute(0, 2, 3, 1).reshape(num_pixels, c)
+        predicted_flat = torch.zeros_like(symbols_flat, dtype=torch.int32)
+        teacher_t = torch.zeros(num_pixels, device=device, dtype=torch.float32)
+
+        states = [
+            block.init_state(num_pixels, device=device, dtype=torch.float32)
+            for block in self.blocks
+        ]
+
+        for band_idx in range(c):
+            predicted_t, states = self._predict_step(teacher_t, states)
+            predicted_flat[:, band_idx] = self._to_symbols(predicted_t)
+            teacher_t = symbols_flat[:, band_idx].to(torch.float32) / self.symbol_scale
+
+        return predicted_flat.reshape(n, h, w, c).permute(0, 3, 1, 2).contiguous()
 
     def _predict_step(
         self,
