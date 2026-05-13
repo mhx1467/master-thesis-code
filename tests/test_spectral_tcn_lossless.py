@@ -45,3 +45,22 @@ def test_spectral_tcn_lossless_requires_symbol_grid_without_raw_fallback():
 
     with pytest.raises(ValueError, match="not exactly representable"):
         model.compress(x)
+
+
+def test_spectral_tcn_lossless_accepts_near_integer_symbol_grid():
+    model = build_model(
+        "spectral_tcn_lossless",
+        in_channels=6,
+        hidden_channels=8,
+        num_blocks=2,
+        raw_fallback=False,
+    )
+    x_int = torch.randint(0, 10001, (1, 6, 2, 2), dtype=torch.int32)
+    x = x_int.to(torch.float32) / 10000.0
+    x = x + 5e-8
+    canonical = x_int.to(torch.float32) / 10000.0
+
+    packed = model.compress(x)
+    decoded = model.decompress(packed["strings"], packed["shape"])
+
+    assert torch.equal(decoded["x_hat"], canonical)

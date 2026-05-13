@@ -255,7 +255,17 @@ def symbols_to_tensor(symbols: torch.Tensor, symbol_scale: int) -> torch.Tensor:
 
 
 def is_exact_symbol_grid(x: torch.Tensor, symbols: torch.Tensor, symbol_scale: int) -> bool:
-    return torch.equal(symbols_to_tensor(symbols, symbol_scale).to(device=x.device), x.float())
+    x_float = x.float()
+    scaled = x_float * float(symbol_scale)
+    finite = torch.isfinite(scaled).all()
+    in_range = (x_float >= -1e-7).all() and (x_float <= 1.0 + 1e-7).all()
+    close_to_symbols = torch.allclose(
+        scaled,
+        symbols.to(dtype=torch.float32, device=x.device),
+        rtol=0.0,
+        atol=1e-3,
+    )
+    return bool(finite and in_range and close_to_symbols)
 
 
 def uint16_to_bitplane_bytes(values: np.ndarray) -> bytes:
@@ -384,6 +394,7 @@ def run_symbols_zlib(
     symbols = tensor_to_symbols(x_cpu, symbol_scale)
     if not is_exact_symbol_grid(x_cpu, symbols, symbol_scale):
         return skipped("symbols_zlib", "input is not exactly representable on symbol grid")
+    x_target = symbols_to_tensor(symbols, symbol_scale)
 
     array = np.ascontiguousarray(symbols.numpy().astype(np.int16, copy=False))
     start = time.perf_counter()
@@ -407,7 +418,7 @@ def run_symbols_zlib(
 
     return summarize_roundtrip(
         codec="symbols_zlib",
-        x=x_cpu,
+        x=x_target,
         encoded=encoded,
         decoded=decoded,
         encode_ms=encode_ms,
@@ -427,6 +438,7 @@ def run_spectral_delta_zlib(
     symbols = tensor_to_symbols(x_cpu, symbol_scale)
     if not is_exact_symbol_grid(x_cpu, symbols, symbol_scale):
         return skipped("spectral_delta_zlib", "input is not exactly representable on symbol grid")
+    x_target = symbols_to_tensor(symbols, symbol_scale)
 
     symbols_np = np.ascontiguousarray(symbols.numpy().astype(np.int32, copy=False))
     residuals = np.empty_like(symbols_np, dtype=np.int16)
@@ -455,7 +467,7 @@ def run_spectral_delta_zlib(
 
     return summarize_roundtrip(
         codec="spectral_delta_zlib",
-        x=x_cpu,
+        x=x_target,
         encoded=encoded,
         decoded=decoded,
         encode_ms=encode_ms,
@@ -479,6 +491,7 @@ def run_symbols_codec(
     symbols = tensor_to_symbols(x_cpu, symbol_scale)
     if not is_exact_symbol_grid(x_cpu, symbols, symbol_scale):
         return skipped(codec, "input is not exactly representable on symbol grid")
+    x_target = symbols_to_tensor(symbols, symbol_scale)
 
     symbols_np = np.ascontiguousarray(symbols.numpy().astype(np.uint16, copy=False))
     payload = uint16_to_bitplane_bytes(symbols_np) if bitplane else symbols_np.tobytes(order="C")
@@ -515,7 +528,7 @@ def run_symbols_codec(
 
     return summarize_roundtrip(
         codec=codec,
-        x=x_cpu,
+        x=x_target,
         encoded=encoded,
         decoded=decoded,
         encode_ms=encode_ms,
@@ -539,6 +552,7 @@ def run_spectral_delta_codec(
     symbols = tensor_to_symbols(x_cpu, symbol_scale)
     if not is_exact_symbol_grid(x_cpu, symbols, symbol_scale):
         return skipped(codec, "input is not exactly representable on symbol grid")
+    x_target = symbols_to_tensor(symbols, symbol_scale)
 
     symbols_np = np.ascontiguousarray(symbols.numpy().astype(np.int32, copy=False))
     residuals = np.empty_like(symbols_np, dtype=np.int32)
@@ -586,7 +600,7 @@ def run_spectral_delta_codec(
 
     return summarize_roundtrip(
         codec=codec,
-        x=x_cpu,
+        x=x_target,
         encoded=encoded,
         decoded=decoded,
         encode_ms=encode_ms,
@@ -642,6 +656,7 @@ def run_tcn_residual_codec(
     symbols = model._to_symbols(x_device)  # noqa: SLF001 - codec audit script uses model internals.
     if not model._is_exact_symbol_grid(x_device, symbols):  # noqa: SLF001
         return skipped(codec, "input is not exactly representable on symbol grid")
+    x_target = model._symbols_to_float(symbols).detach().cpu()  # noqa: SLF001
 
     sync_if_cuda(device)
     start = time.perf_counter()
@@ -687,7 +702,7 @@ def run_tcn_residual_codec(
 
     return summarize_roundtrip(
         codec=codec,
-        x=x_device.detach().cpu(),
+        x=x_target,
         encoded=encoded,
         decoded=decoded.detach().cpu(),
         encode_ms=encode_ms,

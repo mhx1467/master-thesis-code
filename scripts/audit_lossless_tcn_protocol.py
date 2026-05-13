@@ -209,6 +209,8 @@ def audit_sample(
         mask = mask.unsqueeze(0).to(device=device)
 
     exact_grid = is_exact_symbol_grid(model, x)
+    symbols = model._to_symbols(x)  # noqa: SLF001 - protocol audit checks model internals.
+    x_target = model._symbols_to_float(symbols)  # noqa: SLF001
 
     sync_if_cuda(device)
     encode_start = time.perf_counter()
@@ -239,9 +241,12 @@ def audit_sample(
         )
 
     x_cpu = x.detach().cpu()
+    x_target_cpu = x_target.detach().cpu()
     decoded_cpu = decoded.detach().cpu()
-    mismatch_count = int((decoded_cpu != x_cpu).sum().item())
-    max_abs_error = float((decoded_cpu - x_cpu).abs().max().item())
+    mismatch_count = int((decoded_cpu != x_target_cpu).sum().item())
+    max_abs_error = float((decoded_cpu - x_target_cpu).abs().max().item())
+    input_canonical_mismatch_count = int((x_cpu != x_target_cpu).sum().item())
+    input_max_canonical_abs_error = float((x_cpu - x_target_cpu).abs().max().item())
     encoded_bytes = sum_string_bytes(packed["strings"])
     actual_bpppc = compute_actual_bpppc_from_strings(packed["strings"], tuple(x.shape))
 
@@ -262,6 +267,8 @@ def audit_sample(
         "exact_reconstruction": mismatch_count == 0,
         "mismatch_count": mismatch_count,
         "max_abs_error": max_abs_error,
+        "input_canonical_mismatch_count": input_canonical_mismatch_count,
+        "input_max_canonical_abs_error": input_max_canonical_abs_error,
         "encoded_bytes": encoded_bytes,
         "actual_bpppc": actual_bpppc,
         "compression_ratio": compression_ratio,
@@ -290,6 +297,9 @@ def summarize(
         "num_exact_symbol_grid": sum(
             1 for report in sample_reports if report["exact_symbol_grid"] is True
         ),
+        "num_input_bit_exact_to_canonical": sum(
+            1 for report in sample_reports if report["input_canonical_mismatch_count"] == 0
+        ),
         "mean_sample_actual_bpppc": statistics.fmean(
             report["actual_bpppc"] for report in sample_reports
         ),
@@ -301,6 +311,12 @@ def summarize(
         "mean_decode_ms": statistics.fmean(report["decode_ms"] for report in sample_reports),
         "max_abs_error": max(report["max_abs_error"] for report in sample_reports),
         "total_mismatch_count": sum(report["mismatch_count"] for report in sample_reports),
+        "max_input_canonical_abs_error": max(
+            report["input_max_canonical_abs_error"] for report in sample_reports
+        ),
+        "total_input_canonical_mismatch_count": sum(
+            report["input_canonical_mismatch_count"] for report in sample_reports
+        ),
     }
 
 
@@ -335,6 +351,10 @@ def print_report(report: dict[str, Any]) -> None:
     print(f"Backend counts: {summary['backend_counts']}")
     print(f"Exact reconstruction: {summary['all_exact_reconstruction']}")
     print(f"Exact symbol-grid samples: {summary['num_exact_symbol_grid']}/{summary['num_samples']}")
+    print(
+        "Input bit-exact to canonical grid: "
+        f"{summary['num_input_bit_exact_to_canonical']}/{summary['num_samples']}"
+    )
     print(f"Pooled actual bpppc: {summary['pooled_actual_bpppc']:.6f}")
     print(f"Pooled CR: {summary['pooled_compression_ratio']:.4f}:1")
     print(
@@ -342,6 +362,11 @@ def print_report(report: dict[str, Any]) -> None:
     )
     print(f"Total mismatches: {summary['total_mismatch_count']}")
     print(f"Max |err|: {summary['max_abs_error']:.10f}")
+    print(
+        "Input canonicalization mismatches: "
+        f"{summary['total_input_canonical_mismatch_count']} | "
+        f"max |input-canonical|={summary['max_input_canonical_abs_error']:.10f}"
+    )
 
     if report["warnings"]:
         print("\nProtocol warnings:")

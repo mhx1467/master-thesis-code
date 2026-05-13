@@ -281,8 +281,17 @@ class SpectralTCNLossless(nn.Module):
         return symbols.to(torch.float32) / float(self.symbol_scale)
 
     def _is_exact_symbol_grid(self, x: torch.Tensor, symbols: torch.Tensor) -> bool:
-        reconstructed = self._symbols_to_float(symbols).to(device=x.device)
-        return torch.equal(reconstructed, x.to(torch.float32))
+        x_float = x.to(torch.float32)
+        scaled = x_float * float(self.symbol_scale)
+        finite = torch.isfinite(scaled).all()
+        in_range = (x_float >= -1e-7).all() and (x_float <= 1.0 + 1e-7).all()
+        close_to_symbols = torch.allclose(
+            scaled,
+            symbols.to(dtype=torch.float32),
+            rtol=0.0,
+            atol=1e-3,
+        )
+        return bool(finite and in_range and close_to_symbols)
 
     def _pack_array(self, header: dict[str, object], array: np.ndarray) -> bytes:
         header_bytes = json.dumps(header, sort_keys=True).encode("utf-8")
