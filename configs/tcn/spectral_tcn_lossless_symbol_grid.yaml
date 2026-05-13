@@ -4,7 +4,7 @@ experiment:
 
 data:
   difficulty: easy
-  batch_size: 8
+  batch_size: 16
   num_workers: 4
   drop_invalid_channels: true
   prefer_npy: true
@@ -22,14 +22,14 @@ model:
     symbol_scale: 10000
     zlib_level: 9
     raw_fallback: false
-    pixels_per_patch: 1024
+    pixels_per_patch: 256
 
 training:
   epochs: 200
   lr: 0.0002
   loss_name: masked_mse
   grad_clip_max_norm: 1.0
-  use_amp: false
+  use_amp: true
   sam_every_n_epochs: 20
 
 logging:
