@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import struct
 import zlib
 
@@ -77,6 +78,7 @@ class SpectralTCNLossless(nn.Module):
         symbol_scale: int = 10000,
         zlib_level: int = 9,
         raw_fallback: bool = True,
+        pixels_per_patch: int | None = None,
     ):
         super().__init__()
         if in_channels <= 1:
@@ -89,6 +91,8 @@ class SpectralTCNLossless(nn.Module):
             raise ValueError("symbol_scale must be > 0")
         if not (0 <= zlib_level <= 9):
             raise ValueError("zlib_level must be in [0, 9]")
+        if pixels_per_patch is not None and pixels_per_patch <= 0:
+            raise ValueError("pixels_per_patch must be positive or None")
 
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
@@ -97,6 +101,7 @@ class SpectralTCNLossless(nn.Module):
         self.symbol_scale = int(symbol_scale)
         self.zlib_level = int(zlib_level)
         self.raw_fallback = raw_fallback
+        self.pixels_per_patch = pixels_per_patch
 
         self.input_proj = nn.Conv1d(1, hidden_channels, kernel_size=1)
         self.blocks = nn.ModuleList(
@@ -123,15 +128,25 @@ class SpectralTCNLossless(nn.Module):
     def forward(
         self, x: torch.Tensor, valid_mask: torch.Tensor | None = None
     ) -> dict[str, torch.Tensor]:
-        del valid_mask
         symbols = self._to_symbols(x)
         x_target = self._symbols_to_float(symbols)
         teacher = torch.zeros_like(x_target)
         teacher[:, 1:] = x_target[:, :-1]
+
+        mask_for_loss = valid_mask
+        if self.pixels_per_patch is not None:
+            teacher, x_target, mask_for_loss = self._sample_pixel_sequences(
+                teacher=teacher,
+                target=x_target,
+                valid_mask=valid_mask,
+                pixels_per_patch=self.pixels_per_patch,
+            )
+
         x_hat = self._predict_from_teacher_values(teacher)
         return {
             "x_hat": x_hat,
             "x_target": x_target,
+            "mask_for_loss": mask_for_loss,
         }
 
     def update(self, force: bool = False) -> bool:
@@ -232,6 +247,52 @@ class SpectralTCNLossless(nn.Module):
         out = self.output_proj(self.head_act(hidden))
         out = self.output_head(out)
         return out.reshape(n, h, w, c).permute(0, 3, 1, 2).contiguous()
+
+    def _sample_pixel_sequences(
+        self,
+        teacher: torch.Tensor,
+        target: torch.Tensor,
+        valid_mask: torch.Tensor | None,
+        pixels_per_patch: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        n, c, h, w = target.shape
+        num_pixels = h * w
+        sample_count = min(pixels_per_patch, num_pixels)
+        if sample_count == num_pixels:
+            return teacher, target, valid_mask
+
+        if self.training:
+            indices = torch.randperm(num_pixels, device=target.device)[:sample_count]
+        else:
+            indices = torch.linspace(
+                0,
+                num_pixels - 1,
+                steps=sample_count,
+                device=target.device,
+            ).round().long()
+
+        sample_h = math.isqrt(sample_count)
+        while sample_h > 1 and sample_count % sample_h != 0:
+            sample_h -= 1
+        sample_w = sample_count // sample_h
+
+        teacher_flat = teacher.reshape(n, c, num_pixels)
+        target_flat = target.reshape(n, c, num_pixels)
+        sampled_teacher = teacher_flat.index_select(dim=2, index=indices).reshape(
+            n, c, sample_h, sample_w
+        )
+        sampled_target = target_flat.index_select(dim=2, index=indices).reshape(
+            n, c, sample_h, sample_w
+        )
+
+        sampled_mask = None
+        if valid_mask is not None:
+            mask_flat = valid_mask.reshape(n, c, num_pixels)
+            sampled_mask = mask_flat.index_select(dim=2, index=indices).reshape(
+                n, c, sample_h, sample_w
+            )
+
+        return sampled_teacher.contiguous(), sampled_target.contiguous(), sampled_mask
 
     def _decode_symbols_from_residuals(self, residuals: torch.Tensor) -> torch.Tensor:
         n, c, h, w = residuals.shape

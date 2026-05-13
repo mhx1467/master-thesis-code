@@ -119,6 +119,7 @@ def build_spectral_tcn_lossless(in_channels: int, **kwargs):
         symbol_scale=kwargs.get("symbol_scale", 10000),
         zlib_level=kwargs.get("zlib_level", 9),
         raw_fallback=kwargs.get("raw_fallback", True),
+        pixels_per_patch=kwargs.get("pixels_per_patch"),
     )
 
 

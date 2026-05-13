@@ -4,7 +4,7 @@ experiment:
 
 data:
   difficulty: easy
-  batch_size: 2
+  batch_size: 8
   num_workers: 4
   drop_invalid_channels: true
   prefer_npy: true
@@ -22,6 +22,7 @@ model:
     symbol_scale: 10000
     zlib_level: 9
     raw_fallback: false
+    pixels_per_patch: 1024
 
 training:
   epochs: 200
@@ -33,3 +34,4 @@ training:
 
 logging:
   project: hsi-compression-paper
+  use_wandb: true

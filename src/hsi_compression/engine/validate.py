@@ -92,6 +92,8 @@ def validate_one_epoch(
             x_hat_for_loss = outputs.get("x_hat_for_loss", x_hat).float()
             x_target = outputs.get("x_target", x)
             mask_for_loss = outputs.get("mask_for_loss", mask)
+            metric_target = x_target if tuple(x_hat.shape) == tuple(x_target.shape) else x
+            metric_mask = mask_for_loss if tuple(x_hat.shape) == tuple(x_target.shape) else mask
             z = outputs.get("z")
             likelihoods = outputs.get("likelihoods")
             if likelihoods is not None and hasattr(loss_fn, "lmbda"):
@@ -100,29 +102,33 @@ def validate_one_epoch(
                 loss_val = loss_fn(x_hat_for_loss, x_target, mask_for_loss)
 
         masked_mse_val = (
-            masked_mse(x_hat, x, mask) if mask is not None else torch.mean((x_hat - x) ** 2)
+            masked_mse(x_hat, metric_target, metric_mask)
+            if metric_mask is not None
+            else torch.mean((x_hat - metric_target) ** 2)
         )
         masked_mae_val = (
-            masked_mae(x_hat, x, mask) if mask is not None else torch.mean((x_hat - x).abs())
+            masked_mae(x_hat, metric_target, metric_mask)
+            if metric_mask is not None
+            else torch.mean((x_hat - metric_target).abs())
         )
         masked_psnr_val = (
-            masked_psnr(x_hat, x, mask, data_range=1.0)
-            if mask is not None
-            else psnr(x_hat, x, data_range=1.0)
+            masked_psnr(x_hat, metric_target, metric_mask, data_range=1.0)
+            if metric_mask is not None
+            else psnr(x_hat, metric_target, data_range=1.0)
         )
         masked_sam_val = (
-            masked_sam_deg(x_hat, x, mask)
-            if (compute_sam and mask is not None)
-            else (sam_deg(x_hat, x) if compute_sam else None)
+            masked_sam_deg(x_hat, metric_target, metric_mask)
+            if (compute_sam and metric_mask is not None)
+            else (sam_deg(x_hat, metric_target) if compute_sam else None)
         )
-        mse_val = torch.mean((x_hat - x) ** 2)
-        mae_val = mae(x_hat, x)
-        psnr_val = psnr(x_hat, x, data_range=1.0)
-        ssim_val = ref_ssim(x_hat, x, data_range=1.0, channels=x.shape[1])
-        sam_val = ref_sam_deg(x_hat, x) if compute_sam else None
+        mse_val = torch.mean((x_hat - metric_target) ** 2)
+        mae_val = mae(x_hat, metric_target)
+        psnr_val = psnr(x_hat, metric_target, data_range=1.0)
+        ssim_val = ref_ssim(x_hat, metric_target, data_range=1.0, channels=x_hat.shape[1])
+        sam_val = ref_sam_deg(x_hat, metric_target) if compute_sam else None
         invalid_mae_val = (
-            invalid_region_mae(x_hat, mask)
-            if mask is not None
+            invalid_region_mae(x_hat, metric_mask)
+            if metric_mask is not None
             else torch.tensor(0.0, device=device)
         )
 
@@ -139,9 +145,11 @@ def validate_one_epoch(
             totals["masked_sam_deg"] += masked_sam_val.item()
             totals["sam_deg"] += sam_val.item()
             totals["masked_sid"] += (
-                masked_sid(x_hat, x, mask) if mask is not None else sid(x_hat, x)
+                masked_sid(x_hat, metric_target, metric_mask)
+                if metric_mask is not None
+                else sid(x_hat, metric_target)
             ).item()
-            totals["sid"] += sid(x_hat, x).item()
+            totals["sid"] += sid(x_hat, metric_target).item()
 
         num_batches += 1
         if z is not None:

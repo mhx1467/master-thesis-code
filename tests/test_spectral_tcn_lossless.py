@@ -64,3 +64,23 @@ def test_spectral_tcn_lossless_accepts_near_integer_symbol_grid():
     decoded = model.decompress(packed["strings"], packed["shape"])
 
     assert torch.equal(decoded["x_hat"], canonical)
+
+
+def test_spectral_tcn_lossless_training_forward_can_sample_pixels():
+    model = build_model(
+        "spectral_tcn_lossless",
+        in_channels=6,
+        hidden_channels=8,
+        num_blocks=2,
+        pixels_per_patch=4,
+    )
+    model.train()
+    x_int = torch.randint(0, 10001, (2, 6, 4, 4), dtype=torch.int32)
+    x = x_int.to(torch.float32) / 10000.0
+    mask = torch.ones_like(x, dtype=torch.bool)
+
+    outputs = model(x, valid_mask=mask)
+
+    assert outputs["x_hat"].shape == (2, 6, 2, 2)
+    assert outputs["x_target"].shape == (2, 6, 2, 2)
+    assert outputs["mask_for_loss"].shape == (2, 6, 2, 2)
