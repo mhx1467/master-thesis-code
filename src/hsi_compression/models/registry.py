@@ -1,15 +1,6 @@
-from hsi_compression.models import (
-    Baseline1DPixelAutoencoder,
-    Baseline2DAutoencoder,
-    Baseline3DPatchAutoencoder,
-    HierarchicalSpectralMambaAutoencoder,
-    Hybrid2D3DAutoencoderLIC,
-    SpectralMambaAutoencoder,
-    SpectralTCNLossless,
-)
-
-
 def build_baseline_2d_ae(in_channels: int, **kwargs):
+    from hsi_compression.models.baseline_2d_ae import Baseline2DAutoencoder
+
     return Baseline2DAutoencoder(
         in_channels=in_channels,
         hidden_channels=tuple(kwargs.get("hidden_channels", (128, 64))),
@@ -19,6 +10,8 @@ def build_baseline_2d_ae(in_channels: int, **kwargs):
 
 
 def build_baseline_1d_pixel_ae(in_channels: int, **kwargs):
+    from hsi_compression.models.baseline_1d_pixel_ae import Baseline1DPixelAutoencoder
+
     return Baseline1DPixelAutoencoder(
         in_channels=in_channels,
         latent_channels=kwargs.get("latent_channels", 16),
@@ -28,6 +21,8 @@ def build_baseline_1d_pixel_ae(in_channels: int, **kwargs):
 
 
 def build_baseline_3d_patch_ae(in_channels: int, **kwargs):
+    from hsi_compression.models.baseline_3d_patch_ae import Baseline3DPatchAutoencoder
+
     return Baseline3DPatchAutoencoder(
         in_channels=in_channels,
         latent_channels=kwargs.get("latent_channels", 16),
@@ -37,6 +32,8 @@ def build_baseline_3d_patch_ae(in_channels: int, **kwargs):
 
 
 def build_hybrid_2d3d_ae_lic(in_channels: int, **kwargs):
+    from hsi_compression.models.hybrid_2d3d_ae_lic import Hybrid2D3DAutoencoderLIC
+
     return Hybrid2D3DAutoencoderLIC(
         in_channels=in_channels,
         latent_channels=kwargs.get("latent_channels", 16),
@@ -55,7 +52,11 @@ def build_baseline_2d_patch_ae_lic(in_channels: int, **kwargs):
 
 
 def build_spectral_mamba_ae(in_channels: int, **kwargs):
-    return SpectralMambaAutoencoder(
+    from hsi_compression.models.spectral_first_mamba_ae_v2 import (
+        SpectralFirstMambaAutoencoderV2,
+    )
+
+    return SpectralFirstMambaAutoencoderV2(
         in_channels=in_channels,
         latent_channels=kwargs.get("latent_channels", 96),
         group_size=kwargs.get("group_size", 1),
@@ -78,6 +79,10 @@ def build_spectral_mamba_ae(in_channels: int, **kwargs):
 
 
 def build_hierarchical_spectral_mamba_ae(in_channels: int, **kwargs):
+    from hsi_compression.models.hierarchical_spectral_mamba_ae import (
+        HierarchicalSpectralMambaAutoencoder,
+    )
+
     return HierarchicalSpectralMambaAutoencoder(
         in_channels=in_channels,
         latent_channels=kwargs.get("latent_channels", 96),
@@ -102,6 +107,8 @@ def build_hierarchical_spectral_mamba_ae(in_channels: int, **kwargs):
 
 
 def build_spectral_tcn_lossless(in_channels: int, **kwargs):
+    from hsi_compression.models.spectral_tcn_lossless import SpectralTCNLossless
+
     return SpectralTCNLossless(
         in_channels=in_channels,
         hidden_channels=kwargs.get("hidden_channels", 48),
