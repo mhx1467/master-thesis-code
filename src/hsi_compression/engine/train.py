@@ -34,6 +34,7 @@ def train_one_epoch(
     grad_clip_max_norm: float = 1.0,
     scaler: torch.amp.GradScaler | None = None,
     use_amp: bool = False,
+    fast_metrics: bool = False,
 ):
     model.train()
     totals = {
@@ -131,27 +132,35 @@ def train_one_epoch(
                 if mask_for_loss is not None
                 else psnr(x_hat, x_target, data_range=1.0)
             )
-            masked_sam_val = (
-                masked_sam_deg(x_hat, x_target, mask_for_loss)
-                if mask_for_loss is not None
-                else sam_deg(x_hat, x_target)
-            )
             mse_val = torch.mean((x_hat - x_target) ** 2)
             mae_val = mae(x_hat, x_target)
             psnr_val = psnr(x_hat, x_target, data_range=1.0)
-            ssim_val = ssim(x_hat, x_target, data_range=1.0)
-            sam_val = sam_deg(x_hat, x_target)
-            masked_sid_val = (
-                masked_sid(x_hat, x_target, mask_for_loss)
-                if mask_for_loss is not None
-                else sid(x_hat, x_target)
-            )
-            sid_val = sid(x_hat, x_target)
             invalid_mae_val = (
                 invalid_region_mae(x_hat, mask_for_loss)
                 if mask_for_loss is not None
                 else torch.tensor(0.0, device=device)
             )
+            if fast_metrics:
+                skipped_metric = torch.tensor(float("nan"), device=device)
+                masked_sam_val = skipped_metric
+                masked_sid_val = skipped_metric
+                ssim_val = skipped_metric
+                sam_val = skipped_metric
+                sid_val = skipped_metric
+            else:
+                masked_sam_val = (
+                    masked_sam_deg(x_hat, x_target, mask_for_loss)
+                    if mask_for_loss is not None
+                    else sam_deg(x_hat, x_target)
+                )
+                masked_sid_val = (
+                    masked_sid(x_hat, x_target, mask_for_loss)
+                    if mask_for_loss is not None
+                    else sid(x_hat, x_target)
+                )
+                ssim_val = ssim(x_hat, x_target, data_range=1.0)
+                sam_val = sam_deg(x_hat, x_target)
+                sid_val = sid(x_hat, x_target)
 
         metrics = {
             "loss": loss.item(),

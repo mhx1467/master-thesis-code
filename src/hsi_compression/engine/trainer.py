@@ -32,6 +32,7 @@ def fit(
     sam_every_n_epochs: int = 10,
     use_amp: bool = True,
     aux_optimizer=None,
+    fast_train_metrics: bool = False,
 ):
     checkpoint_path = Path(checkpoint_path)
     best_val_loss = float("inf")
@@ -102,6 +103,7 @@ def fit(
             grad_clip_max_norm=grad_clip_max_norm,
             scaler=scaler,
             use_amp=use_amp,
+            fast_metrics=fast_train_metrics,
         )
 
         compute_sam = (epoch % sam_every_n_epochs == 0) or (epoch == epochs)
