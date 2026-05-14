@@ -79,6 +79,7 @@ class SpectralTCNLossless(nn.Module):
         zlib_level: int = 9,
         raw_fallback: bool = True,
         pixels_per_patch: int | None = None,
+        prediction_mode: str = "value",
     ):
         super().__init__()
         if in_channels <= 1:
@@ -93,6 +94,8 @@ class SpectralTCNLossless(nn.Module):
             raise ValueError("zlib_level must be in [0, 9]")
         if pixels_per_patch is not None and pixels_per_patch <= 0:
             raise ValueError("pixels_per_patch must be positive or None")
+        if prediction_mode not in {"value", "delta"}:
+            raise ValueError("prediction_mode must be one of: 'value', 'delta'")
 
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
@@ -102,6 +105,7 @@ class SpectralTCNLossless(nn.Module):
         self.zlib_level = int(zlib_level)
         self.raw_fallback = raw_fallback
         self.pixels_per_patch = pixels_per_patch
+        self.prediction_mode = prediction_mode
 
         self.input_proj = nn.Conv1d(1, hidden_channels, kernel_size=1)
         self.blocks = nn.ModuleList(
@@ -120,18 +124,20 @@ class SpectralTCNLossless(nn.Module):
 
         if output_activation == "sigmoid":
             self.output_head = nn.Sigmoid()
+        elif output_activation == "tanh":
+            self.output_head = nn.Tanh()
         elif output_activation in (None, "identity"):
             self.output_head = nn.Identity()
         else:
-            raise ValueError("output_activation must be one of: 'sigmoid', 'identity', None")
+            raise ValueError(
+                "output_activation must be one of: 'sigmoid', 'tanh', 'identity', None"
+            )
 
     def forward(
         self, x: torch.Tensor, valid_mask: torch.Tensor | None = None
     ) -> dict[str, torch.Tensor]:
         symbols = self._to_symbols(x)
-        x_target = self._symbols_to_float(symbols)
-        teacher = torch.zeros_like(x_target)
-        teacher[:, 1:] = x_target[:, :-1]
+        teacher, x_target = self._teacher_and_target_from_symbols(symbols)
 
         mask_for_loss = valid_mask
         if self.pixels_per_patch is not None:
@@ -179,8 +185,7 @@ class SpectralTCNLossless(nn.Module):
                 "float32 coding or use symbol-grid inputs for predictive residual coding."
             )
 
-        predicted_symbols = self._predict_symbols_sequential_from_symbols(symbols)
-        residuals = (symbols - predicted_symbols).to(torch.int32)
+        residuals = self._residuals_from_symbols(symbols)
 
         residual_min = int(residuals.min().item())
         residual_max = int(residuals.max().item())
@@ -194,6 +199,7 @@ class SpectralTCNLossless(nn.Module):
                 "dtype": np.dtype(residual_dtype).name,
                 "shape": list(symbols.shape),
                 "symbol_scale": self.symbol_scale,
+                "prediction_mode": self.prediction_mode,
             },
             array=residual_array,
         )
@@ -218,7 +224,10 @@ class SpectralTCNLossless(nn.Module):
         residuals = torch.from_numpy(residual_array.reshape(header["shape"])).to(
             device=device, dtype=torch.int32
         )
-        symbols = self._decode_symbols_from_residuals(residuals)
+        symbols = self._decode_symbols_from_residuals(
+            residuals,
+            prediction_mode=str(header.get("prediction_mode", "value")),
+        )
         x_hat = self._symbols_to_float(symbols)
         return {"x_hat": x_hat}
 
@@ -231,9 +240,20 @@ class SpectralTCNLossless(nn.Module):
         return None
 
     def _predict_from_target_symbols(self, symbols: torch.Tensor) -> torch.Tensor:
-        teacher = torch.zeros_like(symbols, dtype=torch.float32)
-        teacher[:, 1:] = symbols[:, :-1].to(torch.float32) / self.symbol_scale
+        teacher, _ = self._teacher_and_target_from_symbols(symbols)
         return self._predict_from_teacher_values(teacher)
+
+    def _teacher_and_target_from_symbols(
+        self, symbols: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.prediction_mode == "value":
+            target = self._symbols_to_float(symbols)
+        else:
+            target = self._deltas_to_float(self._symbols_to_deltas(symbols))
+
+        teacher = torch.zeros_like(target)
+        teacher[:, 1:] = target[:, :-1]
+        return teacher, target
 
     def _predict_from_teacher_values(self, teacher_values: torch.Tensor) -> torch.Tensor:
         n, c, h, w = teacher_values.shape
@@ -294,7 +314,26 @@ class SpectralTCNLossless(nn.Module):
 
         return sampled_teacher.contiguous(), sampled_target.contiguous(), sampled_mask
 
-    def _decode_symbols_from_residuals(self, residuals: torch.Tensor) -> torch.Tensor:
+    def _residuals_from_symbols(self, symbols: torch.Tensor) -> torch.Tensor:
+        if self.prediction_mode == "value":
+            predicted_symbols = self._predict_symbols_sequential_from_symbols(symbols)
+            return (symbols - predicted_symbols).to(torch.int32)
+
+        deltas = self._symbols_to_deltas(symbols)
+        predicted_deltas = self._predict_deltas_sequential_from_symbols(symbols)
+        return (deltas - predicted_deltas).to(torch.int32)
+
+    def _decode_symbols_from_residuals(
+        self,
+        residuals: torch.Tensor,
+        prediction_mode: str | None = None,
+    ) -> torch.Tensor:
+        mode = self.prediction_mode if prediction_mode is None else prediction_mode
+        if mode == "delta":
+            return self._decode_symbols_from_delta_residuals(residuals)
+        if mode != "value":
+            raise ValueError(f"Unknown prediction_mode in payload: {mode!r}")
+
         n, c, h, w = residuals.shape
         num_pixels = n * h * w
         device = residuals.device
@@ -319,6 +358,32 @@ class SpectralTCNLossless(nn.Module):
 
         return decoded_flat.reshape(n, h, w, c).permute(0, 3, 1, 2).contiguous()
 
+    def _decode_symbols_from_delta_residuals(self, residuals: torch.Tensor) -> torch.Tensor:
+        n, c, h, w = residuals.shape
+        num_pixels = n * h * w
+        device = residuals.device
+
+        residuals_flat = residuals.permute(0, 2, 3, 1).reshape(num_pixels, c)
+        decoded_flat = torch.zeros_like(residuals_flat, dtype=torch.int32)
+        teacher_t = torch.zeros(num_pixels, device=device, dtype=torch.float32)
+        prev_symbol = torch.zeros(num_pixels, device=device, dtype=torch.int32)
+
+        states = [
+            block.init_state(num_pixels, device=device, dtype=torch.float32)
+            for block in self.blocks
+        ]
+
+        for band_idx in range(c):
+            predicted_t, states = self._predict_step(teacher_t, states)
+            predicted_delta = self._to_delta_symbols(predicted_t)
+            decoded_delta = predicted_delta + residuals_flat[:, band_idx]
+            decoded_symbol = (prev_symbol + decoded_delta).clamp(0, self.symbol_scale)
+            decoded_flat[:, band_idx] = decoded_symbol
+            teacher_t = decoded_delta.to(torch.float32) / self.symbol_scale
+            prev_symbol = decoded_symbol
+
+        return decoded_flat.reshape(n, h, w, c).permute(0, 3, 1, 2).contiguous()
+
     def _predict_symbols_sequential_from_symbols(self, symbols: torch.Tensor) -> torch.Tensor:
         n, c, h, w = symbols.shape
         num_pixels = n * h * w
@@ -340,6 +405,29 @@ class SpectralTCNLossless(nn.Module):
 
         return predicted_flat.reshape(n, h, w, c).permute(0, 3, 1, 2).contiguous()
 
+    def _predict_deltas_sequential_from_symbols(self, symbols: torch.Tensor) -> torch.Tensor:
+        n, c, h, w = symbols.shape
+        num_pixels = n * h * w
+        device = symbols.device
+
+        deltas_flat = self._symbols_to_deltas(symbols).permute(0, 2, 3, 1).reshape(
+            num_pixels, c
+        )
+        predicted_flat = torch.zeros_like(deltas_flat, dtype=torch.int32)
+        teacher_t = torch.zeros(num_pixels, device=device, dtype=torch.float32)
+
+        states = [
+            block.init_state(num_pixels, device=device, dtype=torch.float32)
+            for block in self.blocks
+        ]
+
+        for band_idx in range(c):
+            predicted_t, states = self._predict_step(teacher_t, states)
+            predicted_flat[:, band_idx] = self._to_delta_symbols(predicted_t)
+            teacher_t = deltas_flat[:, band_idx].to(torch.float32) / self.symbol_scale
+
+        return predicted_flat.reshape(n, h, w, c).permute(0, 3, 1, 2).contiguous()
+
     def _predict_step(
         self,
         teacher_t: torch.Tensor,
@@ -358,8 +446,20 @@ class SpectralTCNLossless(nn.Module):
     def _to_symbols(self, x: torch.Tensor) -> torch.Tensor:
         return torch.round(x.clamp(0.0, 1.0) * self.symbol_scale).to(torch.int32)
 
+    def _to_delta_symbols(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.round(x.clamp(-1.0, 1.0) * self.symbol_scale).to(torch.int32)
+
     def _symbols_to_float(self, symbols: torch.Tensor) -> torch.Tensor:
         return symbols.to(torch.float32) / float(self.symbol_scale)
+
+    def _symbols_to_deltas(self, symbols: torch.Tensor) -> torch.Tensor:
+        deltas = torch.empty_like(symbols, dtype=torch.int32)
+        deltas[:, 0] = symbols[:, 0]
+        deltas[:, 1:] = symbols[:, 1:] - symbols[:, :-1]
+        return deltas
+
+    def _deltas_to_float(self, deltas: torch.Tensor) -> torch.Tensor:
+        return deltas.to(torch.float32) / float(self.symbol_scale)
 
     def _is_exact_symbol_grid(self, x: torch.Tensor, symbols: torch.Tensor) -> bool:
         x_float = x.to(torch.float32)

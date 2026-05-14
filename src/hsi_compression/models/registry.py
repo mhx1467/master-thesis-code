@@ -120,7 +120,17 @@ def build_spectral_tcn_lossless(in_channels: int, **kwargs):
         zlib_level=kwargs.get("zlib_level", 9),
         raw_fallback=kwargs.get("raw_fallback", True),
         pixels_per_patch=kwargs.get("pixels_per_patch"),
+        prediction_mode=kwargs.get("prediction_mode", "value"),
     )
+
+
+def build_spectral_tcn_delta_lossless(in_channels: int, **kwargs):
+    kwargs = {
+        **kwargs,
+        "prediction_mode": "delta",
+        "output_activation": kwargs.get("output_activation", "tanh"),
+    }
+    return build_spectral_tcn_lossless(in_channels=in_channels, **kwargs)
 
 
 MODEL_REGISTRY = {
@@ -131,6 +141,7 @@ MODEL_REGISTRY = {
     "baseline_3d_patch_ae": build_baseline_3d_patch_ae,
     "hierarchical_spectral_mamba_ae": build_hierarchical_spectral_mamba_ae,
     "hybrid_2d3d_ae_lic": build_hybrid_2d3d_ae_lic,
+    "spectral_tcn_delta_lossless": build_spectral_tcn_delta_lossless,
     "spectral_tcn_lossless": build_spectral_tcn_lossless,
     "spectral_mamba_ae": build_spectral_mamba_ae,
     "spectral_first_mamba_ae_v2": build_spectral_mamba_ae,

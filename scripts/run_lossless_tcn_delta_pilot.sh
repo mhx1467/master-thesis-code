@@ -8,12 +8,12 @@ fi
 
 DATASET_ROOT="$1"
 NUM_EVAL_SAMPLES="${2:-256}"
-EPOCHS="${3:-30}"
-CONFIG="configs/tcn/spectral_tcn_lossless_symbol_grid.yaml"
-RUN_NAME="spectral_tcn_lossless_symbol_grid_easy_predictive"
+EPOCHS="${3:-10}"
+CONFIG="configs/tcn/spectral_tcn_delta_lossless_symbol_grid.yaml"
+RUN_NAME="spectral_tcn_delta_lossless_symbol_grid_easy_predictive"
 CHECKPOINT="artifacts/checkpoints/${RUN_NAME}_best.pt"
-OUT_DIR="artifacts/analysis/lossless_tcn_$(date +%Y%m%d_%H%M%S)"
-CODECS="raw_zlib,raw_lzma,raw_zstd,symbols_zlib,symbols_zstd,bitplane_symbols_zstd,spectral_delta_zlib,spectral_delta_zstd,bitplane_spectral_delta_zstd,tcn_residual_zlib,tcn_residual_zstd,bitplane_tcn_residual_zstd"
+OUT_DIR="artifacts/analysis/lossless_tcn_delta_$(date +%Y%m%d_%H%M%S)"
+CODECS="raw_zstd,symbols_zstd,bitplane_symbols_zstd,spectral_delta_zstd,bitplane_spectral_delta_zstd,tcn_residual_zstd,bitplane_tcn_residual_zstd"
 
 mkdir -p "$OUT_DIR"
 
@@ -59,4 +59,4 @@ python scripts/audit_lossless_tcn_protocol.py \
   --require-residual-backend \
   --save-json "$OUT_DIR/audit_lossless_tcn_protocol.json"
 
-echo "Saved lossless pilot outputs to: $OUT_DIR"
+echo "Saved delta-aware lossless TCN pilot outputs to: $OUT_DIR"

@@ -48,6 +48,7 @@ DEFAULT_CODECS = (
     "bitplane_spectral_delta_zstd",
     "tcn_residual_zlib",
     "tcn_residual_zstd",
+    "bitplane_tcn_residual_zstd",
 )
 
 
@@ -194,8 +195,8 @@ def build_tcn_model(
     model_cfg = config.get("model", {})
     model_name = model_cfg.get("model_name", "spectral_tcn_lossless")
     model_kwargs = model_cfg.get("model_kwargs", {})
-    if model_name != "spectral_tcn_lossless":
-        raise ValueError(f"Expected spectral_tcn_lossless config, got {model_name!r}")
+    if model_name not in {"spectral_tcn_lossless", "spectral_tcn_delta_lossless"}:
+        raise ValueError(f"Expected spectral TCN lossless config, got {model_name!r}")
     model = build_model(model_name, in_channels=in_channels, **model_kwargs).to(device)
     model.eval()
     if checkpoint is not None:
@@ -651,6 +652,7 @@ def run_tcn_residual_codec(
     decompressor: Callable[[bytes], bytes],
     level: int,
     original_bits_per_channel: float,
+    bitplane: bool = False,
 ) -> CodecResult:
     x_device = x.to(device=device, dtype=torch.float32)
     symbols = model._to_symbols(x_device)  # noqa: SLF001 - codec audit script uses model internals.
@@ -661,23 +663,34 @@ def run_tcn_residual_codec(
     sync_if_cuda(device)
     start = time.perf_counter()
     with torch.no_grad():
-        predicted_symbols = model._predict_symbols_sequential_from_symbols(symbols)  # noqa: SLF001
-        residuals = (symbols - predicted_symbols).to(torch.int32)
+        residuals = model._residuals_from_symbols(symbols).to(torch.int32)  # noqa: SLF001
     sync_if_cuda(device)
 
     residual_min = int(residuals.min().item())
     residual_max = int(residuals.max().item())
-    residual_dtype = np.int16 if residual_min >= -32768 and residual_max <= 32767 else np.int32
-    residual_array = np.ascontiguousarray(residuals.cpu().numpy().astype(residual_dtype))
+    residuals_np = np.ascontiguousarray(residuals.cpu().numpy().astype(np.int32, copy=False))
+    if bitplane:
+        if residual_min < -32768 or residual_max > 32767:
+            return skipped(codec, "TCN residuals do not fit int16 zigzag bitplane coding")
+        residual_payload = uint16_to_bitplane_bytes(zigzag_encode_int32(residuals_np))
+        payload_dtype = "uint16"
+        transform = "zigzag+bitplane"
+    else:
+        residual_dtype = np.int16 if residual_min >= -32768 and residual_max <= 32767 else np.int32
+        residual_payload = residuals_np.astype(residual_dtype).tobytes(order="C")
+        payload_dtype = np.dtype(residual_dtype).name
+        transform = "none"
+
     encoded = pack_payload(
         {
             "codec_backend": codec,
-            "dtype": np.dtype(residual_dtype).name,
+            "dtype": payload_dtype,
             "shape": list(residuals.shape),
             "symbol_scale": int(model.symbol_scale),
-            "transform": "none",
+            "prediction_mode": getattr(model, "prediction_mode", "value"),
+            "transform": transform,
         },
-        compressor(residual_array.tobytes(order="C"), level),
+        compressor(residual_payload, level),
     )
     encode_ms = (time.perf_counter() - start) * 1000.0
 
@@ -685,16 +698,23 @@ def run_tcn_residual_codec(
     start = time.perf_counter()
     header, compressed_payload = unpack_payload(encoded)
     residual_payload = decompressor(compressed_payload)
-    decoded_residual_array = (
-        np.frombuffer(residual_payload, dtype=np.dtype(header["dtype"]))
-        .copy()
-        .reshape(header["shape"])
-    )
+    if header.get("transform") == "zigzag+bitplane":
+        decoded_mapped = bitplane_bytes_to_uint16(residual_payload, header["shape"])
+        decoded_residual_array = zigzag_decode_uint16(decoded_mapped)
+    else:
+        decoded_residual_array = (
+            np.frombuffer(residual_payload, dtype=np.dtype(header["dtype"]))
+            .copy()
+            .reshape(header["shape"])
+        )
     decoded_residuals = torch.from_numpy(decoded_residual_array).to(
         device=device, dtype=torch.int32
     )
     with torch.no_grad():
-        decoded_symbols = model._decode_symbols_from_residuals(decoded_residuals)  # noqa: SLF001
+        decoded_symbols = model._decode_symbols_from_residuals(  # noqa: SLF001
+            decoded_residuals,
+            prediction_mode=str(header.get("prediction_mode", "value")),
+        )
         decoded = model._symbols_to_float(decoded_symbols)  # noqa: SLF001
     sync_if_cuda(device)
     decode_ms = (time.perf_counter() - start) * 1000.0
@@ -916,6 +936,30 @@ def evaluate_sample(
                     decompressor=zstd_decompress,
                     level=zlib_level,
                     original_bits_per_channel=original_bits_per_channel,
+                )
+            )
+    if "bitplane_tcn_residual_zstd" in codecs:
+        if tcn_model is None:
+            reports.append(skipped("bitplane_tcn_residual_zstd", "TCN model was not built"))
+        elif zstd is None:
+            reports.append(
+                skipped(
+                    "bitplane_tcn_residual_zstd",
+                    "optional dependency 'zstandard' is not installed",
+                )
+            )
+        else:
+            reports.append(
+                run_tcn_residual_codec(
+                    codec="bitplane_tcn_residual_zstd",
+                    model=tcn_model,
+                    x=x,
+                    device=device,
+                    compressor=zstd_compress,
+                    decompressor=zstd_decompress,
+                    level=zlib_level,
+                    original_bits_per_channel=original_bits_per_channel,
+                    bitplane=True,
                 )
             )
 

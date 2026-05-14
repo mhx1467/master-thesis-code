@@ -1,0 +1,40 @@
+experiment:
+  name: spectral_tcn_delta_lossless_symbol_grid_easy_predictive
+  seed: 42
+
+data:
+  difficulty: easy
+  batch_size: 32
+  num_workers: 4
+  drop_invalid_channels: true
+  prefer_npy: true
+  pin_memory: true
+  prefetch_factor: 2
+  train_subset_size: 2048
+  val_subset_size: 512
+
+model:
+  model_name: spectral_tcn_delta_lossless
+  model_kwargs:
+    hidden_channels: 48
+    num_blocks: 6
+    kernel_size: 3
+    dropout: 0.0
+    output_activation: tanh
+    symbol_scale: 10000
+    zlib_level: 9
+    raw_fallback: false
+    pixels_per_patch: 256
+
+training:
+  epochs: 200
+  lr: 0.0002
+  loss_name: masked_mse
+  grad_clip_max_norm: 1.0
+  use_amp: true
+  fast_train_metrics: true
+  sam_every_n_epochs: 20
+
+logging:
+  project: hsi-compression-paper
+  use_wandb: true

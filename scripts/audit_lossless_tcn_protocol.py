@@ -191,8 +191,8 @@ def build_tcn_from_config(config: dict[str, Any], in_channels: int) -> torch.nn.
     model_cfg = config.get("model", {})
     model_name = model_cfg.get("model_name", "spectral_tcn_lossless")
     model_kwargs = model_cfg.get("model_kwargs", {})
-    if model_name != "spectral_tcn_lossless":
-        raise ValueError(f"Expected spectral_tcn_lossless config, got model_name={model_name!r}")
+    if model_name not in {"spectral_tcn_lossless", "spectral_tcn_delta_lossless"}:
+        raise ValueError(f"Expected spectral TCN lossless config, got model_name={model_name!r}")
     return build_model(model_name, in_channels=in_channels, **model_kwargs)
 
 

@@ -10,8 +10,36 @@ def test_registry_builds_spectral_tcn_lossless():
     assert model.supports_actual_compression is True
 
 
+def test_registry_builds_spectral_tcn_delta_lossless():
+    model = build_model(
+        "spectral_tcn_delta_lossless",
+        in_channels=8,
+        hidden_channels=16,
+        num_blocks=3,
+    )
+    assert model.compression_mode == "lossless"
+    assert model.supports_actual_compression is True
+    assert model.prediction_mode == "delta"
+
+
 def test_spectral_tcn_lossless_exact_roundtrip_on_symbol_grid():
     model = build_model("spectral_tcn_lossless", in_channels=8, hidden_channels=8, num_blocks=2)
+    x_int = torch.randint(0, 10001, (1, 8, 3, 3), dtype=torch.int32)
+    x = x_int.to(torch.float32) / 10000.0
+
+    packed = model.compress(x)
+    decoded = model.decompress(packed["strings"], packed["shape"])
+
+    assert torch.equal(decoded["x_hat"], x)
+
+
+def test_spectral_tcn_delta_lossless_exact_roundtrip_on_symbol_grid():
+    model = build_model(
+        "spectral_tcn_delta_lossless",
+        in_channels=8,
+        hidden_channels=8,
+        num_blocks=2,
+    )
     x_int = torch.randint(0, 10001, (1, 8, 3, 3), dtype=torch.int32)
     x = x_int.to(torch.float32) / 10000.0
 
@@ -84,3 +112,22 @@ def test_spectral_tcn_lossless_training_forward_can_sample_pixels():
     assert outputs["x_hat"].shape == (2, 6, 2, 2)
     assert outputs["x_target"].shape == (2, 6, 2, 2)
     assert outputs["mask_for_loss"].shape == (2, 6, 2, 2)
+
+
+def test_spectral_tcn_delta_lossless_training_target_is_delta_domain():
+    model = build_model(
+        "spectral_tcn_delta_lossless",
+        in_channels=4,
+        hidden_channels=8,
+        num_blocks=2,
+    )
+    x_int = torch.tensor([[[[100]], [[125]], [[115]], [[140]]]], dtype=torch.int32)
+    x = x_int.to(torch.float32) / 10000.0
+
+    outputs = model(x)
+
+    expected_delta_target = torch.tensor(
+        [[[[0.0100]], [[0.0025]], [[-0.0010]], [[0.0025]]]],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(outputs["x_target"], expected_delta_target)
