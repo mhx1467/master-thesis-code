@@ -13,6 +13,10 @@ from hsi_compression.engine.validate import validate_one_epoch
 from hsi_compression.utils.distributed import is_main_process
 
 
+def _select_best_by_loss(loss_fn) -> bool:
+    return bool(hasattr(loss_fn, "lmbda") or getattr(loss_fn, "select_by_loss", False))
+
+
 def fit(
     model,
     train_loader,
@@ -35,9 +39,10 @@ def fit(
     fast_train_metrics: bool = False,
 ):
     checkpoint_path = Path(checkpoint_path)
+    select_by_loss = _select_best_by_loss(loss_fn)
     best_val_loss = float("inf")
     best_val_ref_psnr = float("-inf")
-    best_selection_metric = float("inf") if hasattr(loss_fn, "lmbda") else float("-inf")
+    best_selection_metric = float("inf") if select_by_loss else float("-inf")
     last_sam_deg = None
     prev_val_loss = None
     prev_val_psnr = None
@@ -70,7 +75,7 @@ def fit(
             best_val_ref_psnr = ckpt.get("extra", {}).get("best_val_ref_psnr", float("-inf"))
             best_selection_metric = ckpt.get("extra", {}).get(
                 "best_selection_metric",
-                best_val_loss if hasattr(loss_fn, "lmbda") else best_val_ref_psnr,
+                best_val_loss if select_by_loss else best_val_ref_psnr,
             )
             metric_msg = f"Best ref PSNR: {best_val_ref_psnr:.2f} dB"
             print(f"Resumed {start_epoch} | {metric_msg}\n")
@@ -190,15 +195,9 @@ def fit(
             val_ssim_delta = (
                 record["val/ssim"] - prev_val_ssim if prev_val_ssim is not None else None
             )
-            val_loss_delta_str = (
-                f"{val_loss_delta:+.8f}" if val_loss_delta is not None else "n/a"
-            )
-            val_psnr_delta_str = (
-                f"{val_psnr_delta:+.8f}" if val_psnr_delta is not None else "n/a"
-            )
-            val_ssim_delta_str = (
-                f"{val_ssim_delta:+.8f}" if val_ssim_delta is not None else "n/a"
-            )
+            val_loss_delta_str = f"{val_loss_delta:+.8f}" if val_loss_delta is not None else "n/a"
+            val_psnr_delta_str = f"{val_psnr_delta:+.8f}" if val_psnr_delta is not None else "n/a"
+            val_ssim_delta_str = f"{val_ssim_delta:+.8f}" if val_ssim_delta is not None else "n/a"
             print(
                 f"  train mPSNR={record['train/masked_psnr']:.4f}dB | "
                 f"val loss={record['val/loss']:.6f} | "
@@ -229,7 +228,7 @@ def fit(
 
             val_loss = record["val/loss"]
             val_ref_psnr = record["val/psnr"]
-            if hasattr(loss_fn, "lmbda"):
+            if select_by_loss:
                 selection_metric = val_loss
                 improved = selection_metric < best_selection_metric
             else:
@@ -259,10 +258,16 @@ def fit(
                         "val_masked_sam_deg": last_sam_deg,
                     },
                 )
-                print(
-                    f"New best reference PSNR ({best_val_ref_psnr:.2f} dB, "
-                    f"loss={best_val_loss:.6f})"
-                )
+                if select_by_loss:
+                    print(
+                        f"New best validation loss ({best_val_loss:.6f}, "
+                        f"ref PSNR={best_val_ref_psnr:.2f} dB)"
+                    )
+                else:
+                    print(
+                        f"New best reference PSNR ({best_val_ref_psnr:.2f} dB, "
+                        f"loss={best_val_loss:.6f})"
+                    )
 
                 if logger is not None:
                     logger.summary["best_val_loss"] = best_val_loss

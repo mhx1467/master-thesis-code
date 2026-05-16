@@ -43,6 +43,83 @@ class MaskedMSELoss(nn.Module):
         return masked_mse(x_hat, x, mask)
 
 
+class SymbolCodeLengthLoss(nn.Module):
+    """Differentiable proxy for coding integer prediction residuals.
+
+    The forward pass uses rounded integer symbols, while the backward pass treats rounding as
+    identity. This aligns TCN fine-tuning with the lossless residual stream more directly than
+    normalized-value MSE.
+    """
+
+    select_by_loss = True
+
+    def __init__(
+        self,
+        symbol_scale: int = 10000,
+        code_weight: float = 1e-4,
+        mse_weight: float = 1.0,
+        value_min: float = -1.0,
+        value_max: float = 1.0,
+    ):
+        super().__init__()
+        if symbol_scale <= 0:
+            raise ValueError("symbol_scale must be positive")
+        if code_weight < 0.0:
+            raise ValueError("code_weight must be non-negative")
+        if mse_weight < 0.0:
+            raise ValueError("mse_weight must be non-negative")
+        if value_min >= value_max:
+            raise ValueError("value_min must be smaller than value_max")
+
+        self.symbol_scale = int(symbol_scale)
+        self.code_weight = float(code_weight)
+        self.mse_weight = float(mse_weight)
+        self.value_min = float(value_min)
+        self.value_max = float(value_max)
+
+    def forward(
+        self,
+        x_hat: torch.Tensor,
+        x: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        x_hat_fp32 = x_hat.float()
+        x_fp32 = x.float()
+
+        pred_symbols = self._round_ste(
+            x_hat_fp32.clamp(self.value_min, self.value_max) * self.symbol_scale
+        )
+        target_symbols = torch.round(
+            x_fp32.clamp(self.value_min, self.value_max) * self.symbol_scale
+        ).detach()
+
+        residual = target_symbols - pred_symbols
+        code_proxy = torch.log1p(residual.abs()) / math.log(2.0)
+        code_loss = self._masked_mean(code_proxy, mask)
+
+        if self.mse_weight == 0.0:
+            mse_loss = torch.zeros((), device=x_hat.device, dtype=torch.float32)
+        elif mask is None:
+            mse_loss = F.mse_loss(x_hat_fp32, x_fp32)
+        else:
+            mse_loss = masked_mse(x_hat_fp32, x_fp32, mask)
+
+        return self.code_weight * code_loss + self.mse_weight * mse_loss
+
+    @staticmethod
+    def _round_ste(x: torch.Tensor) -> torch.Tensor:
+        return x + (torch.round(x) - x).detach()
+
+    @staticmethod
+    def _masked_mean(values: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        if mask is None:
+            return values.mean()
+        valid = mask.to(device=values.device, dtype=torch.bool)
+        if not valid.any():
+            return torch.zeros((), device=values.device, dtype=values.dtype)
+        return values[valid].mean()
+
+
 class MaskedHybridLoss(nn.Module):
     def __init__(self, alpha: float = 0.1):
         super().__init__()
@@ -116,14 +193,19 @@ LOSS_REGISTRY = {
     "masked_mse": MaskedMSELoss(),
     "hybrid_mse_sam": MaskedHybridLoss(alpha=0.1),
     "rate_distortion": RateDistortionLoss,
+    "symbol_code_length": SymbolCodeLengthLoss,
 }
 
 
 def build_loss(loss_name: str, **kwargs) -> nn.Module:
     if loss_name == "rate_distortion":
         return RateDistortionLoss(**kwargs)
+    if loss_name == "symbol_code_length":
+        return SymbolCodeLengthLoss(**kwargs)
     if loss_name not in LOSS_REGISTRY:
         raise ValueError(
             f"Unknown loss name: '{loss_name}'. Available: {list(LOSS_REGISTRY.keys())}"
         )
+    if kwargs:
+        raise ValueError(f"Loss '{loss_name}' does not accept kwargs: {sorted(kwargs)}")
     return LOSS_REGISTRY[loss_name]

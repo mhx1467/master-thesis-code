@@ -271,6 +271,7 @@ def main():
     epochs = training_cfg.get("epochs", 500)
     lr = training_cfg.get("lr", 1e-4)
     loss_name = training_cfg.get("loss_name", "masked_mse")
+    loss_kwargs = training_cfg.get("loss_kwargs", {})
     grad_clip = training_cfg.get("grad_clip_max_norm", 1.0)
     sam_every = training_cfg.get("sam_every_n_epochs", 10)
     fast_train_metrics = training_cfg.get("fast_train_metrics", False)
@@ -295,7 +296,7 @@ def main():
         )
         print(f"Loss: Rate-Distortion (lambda={rd_lambda}, D={distortion_metric})")
     else:
-        loss_fn = build_loss(loss_name)
+        loss_fn = build_loss(loss_name, **loss_kwargs)
     exp_name = experiment_cfg.get("name", "experiment")
     ckpt_path = checkpoints_dir() / f"{exp_name}_best.pt"
 
