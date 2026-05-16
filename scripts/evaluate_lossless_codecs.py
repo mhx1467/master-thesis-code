@@ -50,6 +50,11 @@ DEFAULT_CODECS = (
     "tcn_residual_zstd",
     "bitplane_tcn_residual_zstd",
 )
+TCN_CODECS = {
+    "tcn_residual_zlib",
+    "tcn_residual_zstd",
+    "bitplane_tcn_residual_zstd",
+}
 
 
 @dataclass(frozen=True)
@@ -1105,7 +1110,7 @@ def main() -> int:
 
     tcn_model = None
     checkpoint = args.checkpoint.expanduser().resolve() if args.checkpoint else None
-    if {"tcn_residual_zlib", "tcn_residual_zstd"} & codecs:
+    if TCN_CODECS & codecs:
         tcn_model = build_tcn_model(config, in_channels, device, checkpoint)
 
     num_samples = min(args.num_samples, len(dataset))
@@ -1113,7 +1118,7 @@ def main() -> int:
         f"Dataset: {dataset_root} | source={args.source} | split={difficulty}/{args.split} | "
         f"samples={num_samples}/{len(dataset)} | symbol_scale={symbol_scale}"
     )
-    if checkpoint is None and {"tcn_residual_zlib", "tcn_residual_zstd"} & codecs:
+    if checkpoint is None and TCN_CODECS & codecs:
         print("Warning: no TCN checkpoint loaded; TCN residual bitrate uses random weights.")
 
     sample_reports = []
