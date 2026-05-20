@@ -24,6 +24,8 @@ EXPECTED_BANDS_BY_MODALITY = {
 ARRAY_SUFFIXES = {".npy", ".npz", ".tif", ".tiff"}
 ID_COLUMN_CANDIDATES = (
     "id",
+    "sample_index",
+    "sampleindex",
     "field_id",
     "sample_id",
     "parcel_id",
@@ -133,11 +135,11 @@ def infer_modality(path: Path) -> str:
     parts = {part.lower() for part in path.parts}
     if "mask" in name:
         return "mask"
-    if "prisma" in text:
+    if "prisma" in text or "hsi_satellite" in parts:
         return "prisma"
-    if "sentinel" in text or "sentinel-2" in text or "s2" in parts:
+    if "sentinel" in text or "sentinel-2" in text or "s2" in parts or "msi_satellite" in parts:
         return "sentinel2"
-    if "airborne" in text or "hyspex" in text or "vs-725" in text:
+    if "airborne" in text or "hsi_airborne" in parts or "hyspex" in text or "vs-725" in text:
         return "airborne"
     return "unknown"
 
@@ -226,6 +228,9 @@ def _clean_identifier(value: str) -> str:
         "sentinel",
         "airborne",
         "hyspex",
+        "hsi",
+        "msi",
+        "satellite",
         "mask",
         "data",
         "gt",
@@ -236,12 +241,23 @@ def _clean_identifier(value: str) -> str:
     return text
 
 
+def _canonical_identifier(value: str) -> str:
+    cleaned = _clean_identifier(value)
+    if cleaned.isdigit():
+        return str(int(cleaned))
+    return cleaned
+
+
+def _identifier_aliases(value: str) -> set[str]:
+    cleaned = _clean_identifier(value)
+    aliases = {cleaned, _canonical_identifier(value)}
+    return {alias for alias in aliases if alias}
+
+
 def _path_id_candidates(path: Path) -> set[str]:
-    candidates = {
-        _clean_identifier(path.stem),
-        _clean_identifier(path.parent.name),
-        _clean_identifier(f"{path.parent.name}_{path.stem}"),
-    }
+    candidates = set()
+    for value in (path.stem, path.parent.name, f"{path.parent.name}_{path.stem}"):
+        candidates.update(_identifier_aliases(value))
     return {candidate for candidate in candidates if candidate}
 
 
@@ -290,8 +306,11 @@ def build_hyperview2_samples(
     samples = []
     missing = []
     for raw_id, target in label_rows:
-        key = _clean_identifier(raw_id)
-        path = array_index.get(key)
+        key = _canonical_identifier(raw_id)
+        path = next(
+            (array_index[alias] for alias in _identifier_aliases(raw_id) if alias in array_index),
+            None,
+        )
         if path is None:
             missing.append(raw_id)
             continue

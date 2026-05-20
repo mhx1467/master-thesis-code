@@ -84,11 +84,11 @@ def infer_modality(path: Path) -> str:
 
     if "mask" in name:
         return "mask"
-    if "prisma" in text:
+    if "prisma" in text or "hsi_satellite" in parts:
         return "prisma"
-    if "sentinel" in text or "sentinel-2" in text or "s2" in parts:
+    if "sentinel" in text or "sentinel-2" in text or "s2" in parts or "msi_satellite" in parts:
         return "sentinel2"
-    if "airborne" in text or "hyspex" in text or "vs-725" in text:
+    if "airborne" in text or "hsi_airborne" in parts or "hyspex" in text or "vs-725" in text:
         return "airborne"
     if any(token in name for token in ("gt", "label", "target", "soil")):
         return "labels"
