@@ -129,6 +129,20 @@ def _parse_float(value: Any) -> float:
     return float(text.replace(",", "."))
 
 
+def infer_split(path: Path) -> str:
+    parts = {part.lower() for part in path.parts}
+    name = path.name.lower()
+    stem = path.stem.lower()
+    tokens = parts | {name, stem}
+    if tokens & {"train", "training", "t"} or stem.startswith("train"):
+        return "train"
+    if tokens & {"val", "valid", "validation", "v"} or stem.startswith(("val", "valid")):
+        return "validation"
+    if tokens & {"test", "testing", "psi", "ψ"} or stem.startswith("test"):
+        return "test"
+    return "unknown"
+
+
 def infer_modality(path: Path) -> str:
     text = path.as_posix().lower()
     name = path.name.lower()
@@ -261,10 +275,12 @@ def _path_id_candidates(path: Path) -> set[str]:
     return {candidate for candidate in candidates if candidate}
 
 
-def _index_paths(dataset_root: Path, modality: str) -> dict[str, Path]:
+def _index_paths(dataset_root: Path, modality: str, split: str | None = None) -> dict[str, Path]:
     buckets: dict[str, list[Path]] = {}
     for path in dataset_root.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in ARRAY_SUFFIXES:
+            continue
+        if split is not None and infer_split(path) != split:
             continue
         inferred = infer_modality(path)
         if modality != "any" and inferred != modality:
@@ -300,8 +316,10 @@ def build_hyperview2_samples(
         else find_label_csv(root, target_columns)
     )
     label_rows = _read_label_rows(label_path, target_columns, id_column)
-    array_index = _index_paths(root, modality)
-    mask_index = _index_paths(root, "mask")
+    label_split = infer_split(label_path)
+    array_split = None if label_split == "unknown" else label_split
+    array_index = _index_paths(root, modality, split=array_split)
+    mask_index = _index_paths(root, "mask", split=array_split)
 
     samples = []
     missing = []
@@ -354,7 +372,12 @@ def load_array(path: str | Path, modality: str = "any") -> np.ndarray:
 
 
 def to_chw(array: np.ndarray, expected_bands: int | None = None) -> np.ndarray:
-    array = np.squeeze(array)
+    array = np.asarray(array)
+    while array.ndim > 3:
+        singleton_axes = [axis for axis, dim in enumerate(array.shape) if dim == 1]
+        if not singleton_axes:
+            break
+        array = np.squeeze(array, axis=singleton_axes[0])
     if array.ndim == 2:
         return array[None].astype(np.float32, copy=False)
     if array.ndim != 3:

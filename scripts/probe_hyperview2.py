@@ -68,11 +68,14 @@ def parse_args() -> argparse.Namespace:
 
 def infer_split(path: Path) -> str:
     parts = {part.lower() for part in path.parts}
-    if parts & {"train", "training", "t"}:
+    name = path.name.lower()
+    stem = path.stem.lower()
+    tokens = parts | {name, stem}
+    if tokens & {"train", "training", "t"} or stem.startswith("train"):
         return "train"
-    if parts & {"val", "valid", "validation", "v"}:
+    if tokens & {"val", "valid", "validation", "v"} or stem.startswith(("val", "valid")):
         return "validation"
-    if parts & {"test", "testing", "psi"}:
+    if tokens & {"test", "testing", "psi", "ψ"} or stem.startswith("test"):
         return "test"
     return "unknown"
 

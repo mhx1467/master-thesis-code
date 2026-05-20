@@ -43,6 +43,7 @@ def test_build_hyperview2_samples_pairs_labels_with_prisma_arrays(tmp_path):
 def test_build_hyperview2_samples_pairs_official_numeric_layout(tmp_path):
     root = tmp_path / "hyperview2"
     (root / "HYPERVIEW2" / "train" / "hsi_satellite").mkdir(parents=True)
+    (root / "HYPERVIEW2" / "test" / "hsi_satellite").mkdir(parents=True)
     with (root / "HYPERVIEW2" / "train_gt.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["sample_index", *HYPERVIEW2_TARGET_COLUMNS])
@@ -56,6 +57,10 @@ def test_build_hyperview2_samples_pairs_official_numeric_layout(tmp_path):
         root / "HYPERVIEW2" / "train" / "hsi_satellite" / "0007.npz",
         cube=np.ones((230, 2, 3)),
     )
+    np.savez(
+        root / "HYPERVIEW2" / "test" / "hsi_satellite" / "0000.npz",
+        cube=np.zeros((230, 2, 3)),
+    )
 
     samples = build_hyperview2_samples(
         root,
@@ -65,6 +70,7 @@ def test_build_hyperview2_samples_pairs_official_numeric_layout(tmp_path):
 
     assert [sample.sample_id for sample in samples] == ["0", "7"]
     assert [sample.array_path.name for sample in samples] == ["0000.npz", "0007.npz"]
+    assert all("train" in sample.array_path.parts for sample in samples)
 
 
 def test_hyperview2_feature_dataset_returns_fixed_spectral_stats(tmp_path):
@@ -89,6 +95,13 @@ def test_to_chw_uses_expected_band_axis():
     chw = to_chw(hwc, expected_bands=230)
 
     assert chw.shape == (230, 4, 5)
+
+
+def test_to_chw_preserves_singleton_spatial_dimensions():
+    cube = np.zeros((230, 1, 2), dtype=np.float32)
+    chw = to_chw(cube, expected_bands=230)
+
+    assert chw.shape == (230, 1, 2)
 
 
 def test_hyperview_score_is_zero_for_perfect_predictions():
