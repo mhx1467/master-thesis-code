@@ -1,0 +1,94 @@
+import csv
+
+import numpy as np
+import pytest
+
+from hsi_compression.downstream import (
+    HYPERVIEW2_TARGET_COLUMNS,
+    Hyperview2FeatureDataset,
+    Standardizer,
+    build_hyperview2_samples,
+    compute_regression_metrics,
+    hyperview_score,
+)
+from hsi_compression.downstream.hyperview2 import to_chw
+
+
+def _write_labels(path, rows):
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["sample_id", *HYPERVIEW2_TARGET_COLUMNS])
+        writer.writerows(rows)
+
+
+def test_build_hyperview2_samples_pairs_labels_with_prisma_arrays(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "prisma").mkdir(parents=True)
+    _write_labels(
+        root / "train.csv",
+        [
+            ["sample001", 1, 2, 3, 4, 5, 6],
+            ["sample002", 2, 3, 4, 5, 6, 7],
+        ],
+    )
+    np.save(root / "train" / "prisma" / "sample001_prisma.npy", np.ones((230, 2, 3)))
+    np.save(root / "train" / "prisma" / "sample002_prisma.npy", np.ones((2, 3, 230)))
+
+    samples = build_hyperview2_samples(root, modality="prisma")
+
+    assert [sample.sample_id for sample in samples] == ["sample001", "sample002"]
+    assert samples[0].target.tolist() == [1, 2, 3, 4, 5, 6]
+
+
+def test_hyperview2_feature_dataset_returns_fixed_spectral_stats(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "prisma").mkdir(parents=True)
+    _write_labels(root / "train.csv", [["sample001", 1, 2, 3, 4, 5, 6]])
+    cube = np.zeros((230, 2, 2), dtype=np.float32)
+    cube[:, 0, 0] = 1.0
+    np.save(root / "train" / "prisma" / "sample001_prisma.npy", cube)
+
+    samples = build_hyperview2_samples(root, modality="prisma")
+    dataset = Hyperview2FeatureDataset(samples, modality="prisma", normalization="none")
+    item = dataset[0]
+
+    assert item["features"].shape[0] == 2 * 230 + 1
+    assert item["target"].shape[0] == 6
+    assert item["features"][-1].item() == pytest.approx(1.0)
+
+
+def test_to_chw_uses_expected_band_axis():
+    hwc = np.zeros((4, 5, 230), dtype=np.float32)
+    chw = to_chw(hwc, expected_bands=230)
+
+    assert chw.shape == (230, 4, 5)
+
+
+def test_hyperview_score_is_zero_for_perfect_predictions():
+    y_true = np.asarray([[1, 2, 3, 4, 5, 6], [2, 3, 4, 5, 6, 7]], dtype=np.float32)
+    baseline_mse = np.ones(6, dtype=np.float32)
+
+    score, per_target = hyperview_score(y_true, y_true.copy(), baseline_mse)
+
+    assert score == 0.0
+    assert np.all(per_target == 0.0)
+
+
+def test_compute_regression_metrics_reports_targets():
+    y_true = np.asarray([[1, 2, 3, 4, 5, 6], [2, 3, 4, 5, 6, 7]], dtype=np.float32)
+    y_pred = y_true + 1.0
+    baseline_mse = np.ones(6, dtype=np.float32) * 2.0
+
+    metrics = compute_regression_metrics(y_true, y_pred, baseline_mse)
+
+    assert metrics["hyperview_score"] == pytest.approx(0.5)
+    assert set(metrics["targets"]) == set(HYPERVIEW2_TARGET_COLUMNS)
+
+
+def test_standardizer_roundtrip():
+    values = np.asarray([[1, 2], [3, 6]], dtype=np.float32)
+    standardizer = Standardizer.fit(values)
+
+    recovered = standardizer.inverse_transform(standardizer.transform(values))
+
+    np.testing.assert_allclose(recovered, values)
