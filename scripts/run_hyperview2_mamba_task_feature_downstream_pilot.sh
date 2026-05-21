@@ -28,6 +28,7 @@ TRAIN_ARGS=(
   --labels-csv "$LABELS_CSV" \
   --pretrained "$PRETRAINED_CKPT" \
   --run-name "$RUN_NAME" \
+  --override-experiment-name "$EXP_NAME" \
   --override-epochs "$EPOCHS"
 )
 if [[ -n "$FEATURE_LOSS_WEIGHT" ]]; then

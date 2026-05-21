@@ -25,6 +25,7 @@ OUT_DIR="artifacts/downstream/${RUN_NAME}_compression_eval"
   --labels-csv "$LABELS_CSV" \
   --pretrained "$PRETRAINED_CKPT" \
   --run-name "$RUN_NAME" \
+  --override-experiment-name "$EXP_NAME" \
   --override-epochs "$EPOCHS"
 
 .venv311/bin/python scripts/evaluate_hyperview2_downstream_compression.py "$HV2_ROOT" \
