@@ -14,9 +14,11 @@ from tqdm.auto import tqdm
 
 from hsi_compression.downstream import (
     HYPERVIEW2_TARGET_COLUMNS,
+    SpectralSetRegressor,
     SpectralStatsRegressor,
     Standardizer,
     build_hyperview2_samples,
+    collate_pixel_set_batch,
     compute_regression_metrics,
     extract_spectral_stats,
 )
@@ -66,20 +68,36 @@ def select_device(requested: str) -> torch.device:
 def _load_downstream_checkpoint(path: Path, device: torch.device) -> dict[str, Any]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     cfg = checkpoint["config"]
-    model = SpectralStatsRegressor(
-        input_dim=int(cfg["input_dim"]),
-        output_dim=len(cfg.get("target_columns", HYPERVIEW2_TARGET_COLUMNS)),
-        hidden_dim=int(cfg["hidden_dim"]),
-        num_layers=int(cfg["num_layers"]),
-        dropout=float(cfg["dropout"]),
-    )
+    model_type = cfg.get("model_type", "spectral_stats")
+    if model_type == "spectral_set":
+        model = SpectralSetRegressor(
+            in_channels=int(cfg["in_channels"]),
+            output_dim=len(cfg.get("target_columns", HYPERVIEW2_TARGET_COLUMNS)),
+            hidden_dim=int(cfg["hidden_dim"]),
+            pixel_layers=int(cfg["pixel_layers"]),
+            head_layers=int(cfg["head_layers"]),
+            dropout=float(cfg["dropout"]),
+        )
+        feature_standardizer = None
+    elif model_type == "spectral_stats":
+        model = SpectralStatsRegressor(
+            input_dim=int(cfg["input_dim"]),
+            output_dim=len(cfg.get("target_columns", HYPERVIEW2_TARGET_COLUMNS)),
+            hidden_dim=int(cfg["hidden_dim"]),
+            num_layers=int(cfg["num_layers"]),
+            dropout=float(cfg["dropout"]),
+        )
+        feature_standardizer = Standardizer.from_dict(checkpoint["feature_standardizer"])
+    else:
+        raise ValueError(f"Unsupported downstream model_type: {model_type}")
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device).eval()
     return {
         "checkpoint": checkpoint,
         "model": model,
         "config": cfg,
-        "feature_standardizer": Standardizer.from_dict(checkpoint["feature_standardizer"]),
+        "model_type": model_type,
+        "feature_standardizer": feature_standardizer,
         "target_standardizer": Standardizer.from_dict(checkpoint["target_standardizer"]),
         "baseline_mse": np.asarray(checkpoint["baseline_mse"], dtype=np.float32),
     }
@@ -202,6 +220,48 @@ def _predict(
     return target_standardizer.inverse_transform(np.concatenate(preds, axis=0))
 
 
+def _cube_to_pixel_item(
+    cube: np.ndarray,
+    mask: np.ndarray | None,
+    normalization: str,
+    target: np.ndarray,
+    sample_id: str,
+    path: str,
+) -> dict[str, Any]:
+    cube = normalize_cube(cube, mask=mask, mode=normalization)
+    c, h, w = cube.shape
+    pixels = cube.reshape(c, h * w).T.astype(np.float32, copy=False)
+    if mask is not None:
+        valid = mask.reshape(h * w).astype(bool)
+    else:
+        valid = np.isfinite(pixels).all(axis=1)
+    return {
+        "pixels": torch.from_numpy(np.ascontiguousarray(pixels, dtype=np.float32)),
+        "valid_mask": torch.from_numpy(np.ascontiguousarray(valid, dtype=bool)),
+        "target": torch.from_numpy(target.astype(np.float32)),
+        "sample_id": sample_id,
+        "path": path,
+    }
+
+
+def _predict_pixel_sets(
+    model: torch.nn.Module,
+    items: list[dict[str, Any]],
+    target_standardizer: Standardizer,
+    batch_size: int,
+    device: torch.device,
+) -> np.ndarray:
+    preds = []
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, len(items), batch_size):
+            batch = collate_pixel_set_batch(items[start : start + batch_size])
+            pixels = batch["pixels"].to(device)
+            valid_mask = batch["valid_mask"].to(device)
+            preds.append(model(pixels, valid_mask).cpu().numpy())
+    return target_standardizer.inverse_transform(np.concatenate(preds, axis=0))
+
+
 def _write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -244,8 +304,11 @@ def main() -> int:
 
     original_features = []
     reconstructed_features = []
+    original_pixel_items = []
+    reconstructed_pixel_items = []
     targets = []
     sample_ids = []
+    model_type = downstream["model_type"]
     for sample in tqdm(samples, desc="Reconstruct + extract downstream features"):
         cube_raw = load_array(sample.array_path, modality=modality)
         mask = load_mask(sample.mask_path, shape_hw=tuple(cube_raw.shape[-2:]))
@@ -258,35 +321,73 @@ def main() -> int:
             pad_multiple=args.pad_multiple,
             mode=args.reconstruction_mode,
         )
-        original_features.append(
-            extract_spectral_stats(cube_raw, mask=mask, normalization=normalization)
-        )
-        reconstructed_features.append(
-            extract_spectral_stats(reconstructed, mask=mask, normalization="none")
-        )
+        if model_type == "spectral_set":
+            original_pixel_items.append(
+                _cube_to_pixel_item(
+                    cube_raw,
+                    mask=mask,
+                    normalization=normalization,
+                    target=sample.target,
+                    sample_id=sample.sample_id,
+                    path=str(sample.array_path),
+                )
+            )
+            reconstructed_pixel_items.append(
+                _cube_to_pixel_item(
+                    reconstructed,
+                    mask=mask,
+                    normalization="none",
+                    target=sample.target,
+                    sample_id=sample.sample_id,
+                    path=str(sample.array_path),
+                )
+            )
+        else:
+            original_features.append(
+                extract_spectral_stats(cube_raw, mask=mask, normalization=normalization)
+            )
+            reconstructed_features.append(
+                extract_spectral_stats(reconstructed, mask=mask, normalization="none")
+            )
         targets.append(sample.target)
         sample_ids.append(sample.sample_id)
 
-    original_features_np = np.stack(original_features).astype(np.float32)
-    reconstructed_features_np = np.stack(reconstructed_features).astype(np.float32)
     targets_np = np.stack(targets).astype(np.float32)
 
-    pred_original = _predict(
-        downstream["model"],
-        original_features_np,
-        downstream["feature_standardizer"],
-        downstream["target_standardizer"],
-        batch_size=args.batch_size,
-        device=device,
-    )
-    pred_reconstructed = _predict(
-        downstream["model"],
-        reconstructed_features_np,
-        downstream["feature_standardizer"],
-        downstream["target_standardizer"],
-        batch_size=args.batch_size,
-        device=device,
-    )
+    if model_type == "spectral_set":
+        pred_original = _predict_pixel_sets(
+            downstream["model"],
+            original_pixel_items,
+            downstream["target_standardizer"],
+            batch_size=args.batch_size,
+            device=device,
+        )
+        pred_reconstructed = _predict_pixel_sets(
+            downstream["model"],
+            reconstructed_pixel_items,
+            downstream["target_standardizer"],
+            batch_size=args.batch_size,
+            device=device,
+        )
+    else:
+        original_features_np = np.stack(original_features).astype(np.float32)
+        reconstructed_features_np = np.stack(reconstructed_features).astype(np.float32)
+        pred_original = _predict(
+            downstream["model"],
+            original_features_np,
+            downstream["feature_standardizer"],
+            downstream["target_standardizer"],
+            batch_size=args.batch_size,
+            device=device,
+        )
+        pred_reconstructed = _predict(
+            downstream["model"],
+            reconstructed_features_np,
+            downstream["feature_standardizer"],
+            downstream["target_standardizer"],
+            batch_size=args.batch_size,
+            device=device,
+        )
 
     original_metrics = compute_regression_metrics(
         targets_np,
@@ -309,6 +410,7 @@ def main() -> int:
         "split": args.split,
         "modality": modality,
         "normalization": normalization,
+        "downstream_model_type": model_type,
         "reconstruction_mode": args.reconstruction_mode,
         "num_samples": len(samples),
         "original_metrics": original_metrics,

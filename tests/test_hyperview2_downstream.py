@@ -2,12 +2,16 @@ import csv
 
 import numpy as np
 import pytest
+import torch
 
 from hsi_compression.downstream import (
     HYPERVIEW2_TARGET_COLUMNS,
     Hyperview2FeatureDataset,
+    Hyperview2PixelSetDataset,
+    SpectralSetRegressor,
     Standardizer,
     build_hyperview2_samples,
+    collate_pixel_set_batch,
     compute_regression_metrics,
     hyperview_score,
 )
@@ -88,6 +92,67 @@ def test_hyperview2_feature_dataset_returns_fixed_spectral_stats(tmp_path):
     assert item["features"].shape[0] == 2 * 230 + 1
     assert item["target"].shape[0] == 6
     assert item["features"][-1].item() == pytest.approx(1.0)
+
+
+def test_hyperview2_pixel_set_dataset_returns_pixel_spectra(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "prisma").mkdir(parents=True)
+    _write_labels(root / "train.csv", [["sample001", 1, 2, 3, 4, 5, 6]])
+    cube = np.zeros((230, 1, 2), dtype=np.float32)
+    cube[:, 0, 0] = 1.0
+    np.save(root / "train" / "prisma" / "sample001_prisma.npy", cube)
+
+    samples = build_hyperview2_samples(root, modality="prisma")
+    dataset = Hyperview2PixelSetDataset(samples, modality="prisma", normalization="none")
+    item = dataset[0]
+
+    assert item["pixels"].shape == (2, 230)
+    assert item["valid_mask"].shape == (2,)
+    assert item["valid_mask"].all()
+
+
+def test_collate_pixel_set_batch_pads_variable_pixel_counts():
+    batch = [
+        {
+            "pixels": np.ones((2, 230), dtype=np.float32),
+            "valid_mask": np.ones(2, dtype=bool),
+            "target": np.ones(6, dtype=np.float32),
+            "sample_id": "a",
+            "path": "a.npz",
+        },
+        {
+            "pixels": np.ones((3, 230), dtype=np.float32),
+            "valid_mask": np.asarray([True, False, True]),
+            "target": np.ones(6, dtype=np.float32) * 2,
+            "sample_id": "b",
+            "path": "b.npz",
+        },
+    ]
+    tensor_batch = [
+        {
+            "pixels": torch.from_numpy(item["pixels"]),
+            "valid_mask": torch.from_numpy(item["valid_mask"]),
+            "target": torch.from_numpy(item["target"]),
+            "sample_id": item["sample_id"],
+            "path": item["path"],
+        }
+        for item in batch
+    ]
+
+    out = collate_pixel_set_batch(tensor_batch)
+
+    assert out["pixels"].shape == (2, 3, 230)
+    assert out["valid_mask"].tolist() == [[True, True, False], [True, False, True]]
+
+
+def test_spectral_set_regressor_forward_shape():
+    model = SpectralSetRegressor(in_channels=230, hidden_dim=16, pixel_layers=2, head_layers=2)
+    pixels = torch.randn(4, 5, 230)
+    valid_mask = torch.ones(4, 5, dtype=torch.bool)
+
+    y = model(pixels, valid_mask)
+
+    assert y.shape == (4, 6)
 
 
 def test_to_chw_uses_expected_band_axis():

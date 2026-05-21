@@ -116,6 +116,95 @@ class SpectralStatsRegressor(nn.Module):
         return self.net(x)
 
 
+class SpectralSetRegressor(nn.Module):
+    """Regress soil parameters from a set of pixel spectra."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        output_dim: int = len(HYPERVIEW2_TARGET_COLUMNS),
+        hidden_dim: int = 256,
+        pixel_layers: int = 3,
+        head_layers: int = 3,
+        dropout: float = 0.15,
+    ):
+        super().__init__()
+        if in_channels <= 0:
+            raise ValueError("in_channels must be positive")
+        if output_dim <= 0:
+            raise ValueError("output_dim must be positive")
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive")
+        if pixel_layers < 1:
+            raise ValueError("pixel_layers must be >= 1")
+        if head_layers < 1:
+            raise ValueError("head_layers must be >= 1")
+
+        encoder_layers: list[nn.Module] = []
+        prev_dim = in_channels
+        for _ in range(pixel_layers):
+            encoder_layers.extend(
+                [
+                    nn.Linear(prev_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+                ]
+            )
+            prev_dim = hidden_dim
+        self.pixel_encoder = nn.Sequential(*encoder_layers)
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+        head_input_dim = hidden_dim * 2 + 1
+        head: list[nn.Module] = []
+        prev_dim = head_input_dim
+        for _ in range(head_layers - 1):
+            head.extend(
+                [
+                    nn.Linear(prev_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+                ]
+            )
+            prev_dim = hidden_dim
+        head.append(nn.Linear(prev_dim, output_dim))
+        self.head = nn.Sequential(*head)
+
+    def forward(self, pixels: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
+        if pixels.ndim != 3:
+            raise ValueError(f"Expected pixels with shape (B, N, C), got {tuple(pixels.shape)}")
+        valid_mask = torch.isfinite(pixels).all(dim=-1) if valid_mask is None else valid_mask.bool()
+        if valid_mask.shape != pixels.shape[:2]:
+            raise ValueError(
+                f"valid_mask shape {tuple(valid_mask.shape)} does not match pixels {tuple(pixels.shape)}"
+            )
+
+        pixels = torch.nan_to_num(pixels, nan=0.0, posinf=0.0, neginf=0.0)
+        empty_rows = ~valid_mask.any(dim=1)
+        if empty_rows.any():
+            valid_mask = valid_mask.clone()
+            valid_mask[empty_rows, 0] = True
+
+        encoded = self.pixel_encoder(pixels)
+        mask_f = valid_mask.unsqueeze(-1).to(encoded.dtype)
+        denom = mask_f.sum(dim=1).clamp_min(1.0)
+        mean_pool = (encoded * mask_f).sum(dim=1) / denom
+
+        scores = self.attention(encoded).squeeze(-1)
+        scores = scores.masked_fill(~valid_mask, torch.finfo(scores.dtype).min)
+        weights = torch.softmax(scores, dim=1).unsqueeze(-1)
+        attn_pool = (encoded * weights).sum(dim=1)
+        valid_fraction = valid_mask.to(encoded.dtype).mean(dim=1, keepdim=True)
+
+        pooled = torch.cat([attn_pool, mean_pool, valid_fraction], dim=1)
+        return self.head(pooled)
+
+
 def normalize_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
 
@@ -502,9 +591,80 @@ class Hyperview2FeatureDataset(Dataset):
         }
 
 
+class Hyperview2PixelSetDataset(Dataset):
+    def __init__(
+        self,
+        samples: Sequence[Hyperview2Sample],
+        modality: str = "prisma",
+        normalization: str = "percentile",
+        max_pixels: int | None = None,
+    ):
+        if not samples:
+            raise ValueError("Empty Hyperview2PixelSetDataset")
+        if max_pixels is not None and max_pixels <= 0:
+            raise ValueError("max_pixels must be positive when provided")
+        self.samples = list(samples)
+        self.modality = modality
+        self.normalization = normalization
+        self.max_pixels = max_pixels
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        sample = self.samples[idx]
+        cube = load_array(sample.array_path, modality=self.modality)
+        mask = load_mask(sample.mask_path, shape_hw=tuple(cube.shape[-2:]))
+        cube = normalize_cube(cube, mask=mask, mode=self.normalization)
+        c, h, w = cube.shape
+        pixels = cube.reshape(c, h * w).T.astype(np.float32, copy=False)
+        if mask is not None:
+            valid = mask.reshape(h * w).astype(bool)
+        else:
+            valid = np.isfinite(pixels).all(axis=1)
+        if self.max_pixels is not None and pixels.shape[0] > self.max_pixels:
+            valid_indices = np.flatnonzero(valid)
+            if valid_indices.size > self.max_pixels:
+                take = np.linspace(0, valid_indices.size - 1, self.max_pixels, dtype=np.int64)
+                selected = valid_indices[take]
+            else:
+                selected = np.linspace(0, pixels.shape[0] - 1, self.max_pixels, dtype=np.int64)
+            pixels = pixels[selected]
+            valid = valid[selected]
+        return {
+            "pixels": torch.from_numpy(np.ascontiguousarray(pixels, dtype=np.float32)),
+            "valid_mask": torch.from_numpy(np.ascontiguousarray(valid, dtype=bool)),
+            "target": torch.from_numpy(sample.target.astype(np.float32)),
+            "sample_id": sample.sample_id,
+            "path": str(sample.array_path),
+        }
+
+
 def collate_feature_batch(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return {
         "features": torch.stack([item["features"] for item in batch], dim=0),
+        "target": torch.stack([item["target"] for item in batch], dim=0),
+        "sample_id": [item["sample_id"] for item in batch],
+        "path": [item["path"] for item in batch],
+    }
+
+
+def collate_pixel_set_batch(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    channels = {int(item["pixels"].shape[1]) for item in batch}
+    if len(channels) != 1:
+        raise ValueError(f"All samples in a batch must have the same band count, got {channels}")
+    batch_size = len(batch)
+    max_pixels = max(int(item["pixels"].shape[0]) for item in batch)
+    in_channels = channels.pop()
+    pixels = torch.zeros(batch_size, max_pixels, in_channels, dtype=torch.float32)
+    valid_mask = torch.zeros(batch_size, max_pixels, dtype=torch.bool)
+    for idx, item in enumerate(batch):
+        n_pixels = int(item["pixels"].shape[0])
+        pixels[idx, :n_pixels] = item["pixels"]
+        valid_mask[idx, :n_pixels] = item["valid_mask"]
+    return {
+        "pixels": pixels,
+        "valid_mask": valid_mask,
         "target": torch.stack([item["target"] for item in batch], dim=0),
         "sample_id": [item["sample_id"] for item in batch],
         "path": [item["path"] for item in batch],
