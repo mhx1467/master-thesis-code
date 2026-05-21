@@ -273,6 +273,9 @@ def main() -> int:
     else:
         loss_fn = build_loss(loss_name, **loss_kwargs)
         print(f"Loss: {loss_name}")
+    # HYPERVIEW2 batches are padded to support variable tiny spatial shapes. Checkpoint
+    # selection must follow the masked validation objective, not unmasked padded PSNR.
+    loss_fn.select_by_loss = True
 
     exp_name = experiment_cfg.get("name", "hyperview2_compressor")
     ckpt_path = checkpoints_dir() / f"{exp_name}_best.pt"
