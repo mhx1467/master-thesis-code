@@ -64,6 +64,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--override-lr", type=float, default=None)
     parser.add_argument("--override-epochs", type=int, default=None)
     parser.add_argument("--override-experiment-name", type=str, default=None)
+    parser.add_argument("--override-feature-loss-weight", type=float, default=None)
+    parser.add_argument("--override-prediction-loss-weight", type=float, default=None)
     return parser.parse_args()
 
 
@@ -234,6 +236,10 @@ def main() -> int:
         training_cfg["lr"] = args.override_lr
     if args.override_epochs is not None:
         training_cfg["epochs"] = args.override_epochs
+    if args.override_feature_loss_weight is not None:
+        training_cfg["feature_loss_weight"] = args.override_feature_loss_weight
+    if args.override_prediction_loss_weight is not None:
+        training_cfg["prediction_loss_weight"] = args.override_prediction_loss_weight
     cfg["experiment"] = experiment_cfg
     cfg["training"] = training_cfg
 
