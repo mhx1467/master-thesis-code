@@ -45,6 +45,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--disable-wandb", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--pretrained",
+        type=Path,
+        default=None,
+        help="Optional compressor checkpoint to initialize from before fine-tuning.",
+    )
     parser.add_argument("--wandb-run-id", type=str, default=None)
     parser.add_argument(
         "--wandb-resume",
@@ -236,6 +242,15 @@ def main() -> int:
     model = build_model(model_name=model_name, in_channels=num_input_bands, **model_kwargs).to(
         device
     )
+    if args.pretrained is not None:
+        if not args.pretrained.exists():
+            raise FileNotFoundError(
+                f"Pretrained compressor checkpoint not found: {args.pretrained}"
+            )
+        print(f"\nLoading pretrained compressor weights from: {args.pretrained}")
+        checkpoint = torch.load(args.pretrained, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print("Pretrained weights loaded.\n")
     n_params = sum(param.numel() for param in model.parameters() if param.requires_grad)
     print(f"Model: {model_name} | Parameters: {n_params:,}")
 
