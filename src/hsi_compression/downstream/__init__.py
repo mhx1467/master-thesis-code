@@ -1,5 +1,6 @@
 from .hyperview2 import (
     HYPERVIEW2_TARGET_COLUMNS,
+    Hyperview2CompressionDataset,
     Hyperview2FeatureDataset,
     Hyperview2PixelSetDataset,
     Hyperview2Sample,
@@ -7,6 +8,7 @@ from .hyperview2 import (
     SpectralStatsRegressor,
     Standardizer,
     build_hyperview2_samples,
+    collate_compression_batch,
     collate_feature_batch,
     collate_pixel_set_batch,
     compute_regression_metrics,
@@ -17,6 +19,7 @@ from .hyperview2 import (
 
 __all__ = [
     "HYPERVIEW2_TARGET_COLUMNS",
+    "Hyperview2CompressionDataset",
     "Hyperview2FeatureDataset",
     "Hyperview2PixelSetDataset",
     "Hyperview2Sample",
@@ -24,6 +27,7 @@ __all__ = [
     "SpectralStatsRegressor",
     "Standardizer",
     "build_hyperview2_samples",
+    "collate_compression_batch",
     "collate_feature_batch",
     "collate_pixel_set_batch",
     "compute_regression_metrics",

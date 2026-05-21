@@ -47,7 +47,13 @@ def ref_ssim(
 ) -> torch.Tensor:
     if channels is None:
         channels = int(x.shape[1])
-    metric = pytorch_msssim.SSIM(data_range=data_range, channel=channels).to(x.device)
+    spatial_min = min(int(x.shape[-2]), int(x.shape[-1]))
+    win_size = min(11, spatial_min if spatial_min % 2 == 1 else spatial_min - 1)
+    if win_size < 3:
+        return torch.tensor(float("nan"), device=x.device)
+    metric = pytorch_msssim.SSIM(data_range=data_range, channel=channels, win_size=win_size).to(
+        x.device
+    )
     return metric(x_hat, x)
 
 

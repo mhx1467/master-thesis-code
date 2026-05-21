@@ -13,6 +13,7 @@ import numpy as np
 import tifffile
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 HYPERVIEW2_TARGET_COLUMNS = ("B", "Cu", "Zn", "Fe", "S", "Mn")
@@ -640,6 +641,46 @@ class Hyperview2PixelSetDataset(Dataset):
         }
 
 
+class Hyperview2CompressionDataset(Dataset):
+    """HYPERVIEW2 cubes for unsupervised compressor training.
+
+    The dataset returns normalized CHW cubes and per-value validity masks. Spatial dimensions
+    are intentionally left untouched here; use ``collate_compression_batch`` to pad batches.
+    """
+
+    def __init__(
+        self,
+        samples: Sequence[Hyperview2Sample],
+        modality: str = "prisma",
+        normalization: str = "percentile",
+    ):
+        if not samples:
+            raise ValueError("Empty Hyperview2CompressionDataset")
+        self.samples = list(samples)
+        self.modality = modality
+        self.normalization = normalization
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        sample = self.samples[idx]
+        cube = load_array(sample.array_path, modality=self.modality)
+        mask = load_mask(sample.mask_path, shape_hw=tuple(cube.shape[-2:]))
+        cube = normalize_cube(cube, mask=mask, mode=self.normalization)
+        c, h, w = cube.shape
+        if mask is None:
+            valid_mask = np.isfinite(cube)
+        else:
+            valid_mask = np.broadcast_to(mask[None], (c, h, w)).copy()
+        return {
+            "x": torch.from_numpy(np.ascontiguousarray(cube, dtype=np.float32)),
+            "valid_mask": torch.from_numpy(np.ascontiguousarray(valid_mask, dtype=bool)),
+            "sample_id": sample.sample_id,
+            "path": str(sample.array_path),
+        }
+
+
 def collate_feature_batch(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return {
         "features": torch.stack([item["features"] for item in batch], dim=0),
@@ -668,6 +709,49 @@ def collate_pixel_set_batch(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "target": torch.stack([item["target"] for item in batch], dim=0),
         "sample_id": [item["sample_id"] for item in batch],
         "path": [item["path"] for item in batch],
+    }
+
+
+def _padded_size(size: int, pad_multiple: int, min_size: int) -> int:
+    target = max(int(size), int(min_size))
+    if pad_multiple <= 1:
+        return target
+    remainder = target % pad_multiple
+    return target if remainder == 0 else target + pad_multiple - remainder
+
+
+def collate_compression_batch(
+    batch: Sequence[dict[str, Any]],
+    pad_multiple: int = 4,
+    min_spatial_size: int = 4,
+) -> dict[str, Any]:
+    channels = {int(item["x"].shape[0]) for item in batch}
+    if len(channels) != 1:
+        raise ValueError(f"All samples in a batch must have the same band count, got {channels}")
+    in_channels = channels.pop()
+    max_h = max(int(item["x"].shape[-2]) for item in batch)
+    max_w = max(int(item["x"].shape[-1]) for item in batch)
+    padded_h = _padded_size(max_h, pad_multiple=pad_multiple, min_size=min_spatial_size)
+    padded_w = _padded_size(max_w, pad_multiple=pad_multiple, min_size=min_spatial_size)
+
+    xs = torch.zeros(len(batch), in_channels, padded_h, padded_w, dtype=torch.float32)
+    masks = torch.zeros(len(batch), in_channels, padded_h, padded_w, dtype=torch.bool)
+    original_shapes = []
+    for idx, item in enumerate(batch):
+        x = item["x"]
+        valid_mask = item["valid_mask"].bool()
+        h, w = int(x.shape[-2]), int(x.shape[-1])
+        pad_h = padded_h - h
+        pad_w = padded_w - w
+        xs[idx] = F.pad(x.unsqueeze(0), (0, pad_w, 0, pad_h), mode="replicate").squeeze(0)
+        masks[idx, :, :h, :w] = valid_mask
+        original_shapes.append(tuple(int(dim) for dim in x.shape))
+    return {
+        "x": xs,
+        "valid_mask": masks,
+        "sample_id": [item["sample_id"] for item in batch],
+        "path": [item["path"] for item in batch],
+        "original_shape": original_shapes,
     }
 
 

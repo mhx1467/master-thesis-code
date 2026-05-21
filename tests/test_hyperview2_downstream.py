@@ -6,11 +6,13 @@ import torch
 
 from hsi_compression.downstream import (
     HYPERVIEW2_TARGET_COLUMNS,
+    Hyperview2CompressionDataset,
     Hyperview2FeatureDataset,
     Hyperview2PixelSetDataset,
     SpectralSetRegressor,
     Standardizer,
     build_hyperview2_samples,
+    collate_compression_batch,
     collate_pixel_set_batch,
     compute_regression_metrics,
     hyperview_score,
@@ -109,6 +111,31 @@ def test_hyperview2_pixel_set_dataset_returns_pixel_spectra(tmp_path):
     assert item["pixels"].shape == (2, 230)
     assert item["valid_mask"].shape == (2,)
     assert item["valid_mask"].all()
+
+
+def test_hyperview2_compression_dataset_and_collate_pad_spatial(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "prisma").mkdir(parents=True)
+    _write_labels(
+        root / "train.csv",
+        [
+            ["sample001", 1, 2, 3, 4, 5, 6],
+            ["sample002", 2, 3, 4, 5, 6, 7],
+        ],
+    )
+    np.save(root / "train" / "prisma" / "sample001_prisma.npy", np.ones((230, 1, 2)))
+    np.save(root / "train" / "prisma" / "sample002_prisma.npy", np.ones((230, 2, 3)))
+
+    samples = build_hyperview2_samples(root, modality="prisma")
+    dataset = Hyperview2CompressionDataset(samples, modality="prisma", normalization="none")
+    batch = collate_compression_batch([dataset[0], dataset[1]], pad_multiple=4)
+
+    assert batch["x"].shape == (2, 230, 4, 4)
+    assert batch["valid_mask"].shape == (2, 230, 4, 4)
+    assert batch["x"][0, 0, -1, -1].item() == pytest.approx(1.0)
+    assert batch["valid_mask"][0, :, :1, :2].all()
+    assert not batch["valid_mask"][0, :, 1:, :].any()
+    assert batch["original_shape"] == [(230, 1, 2), (230, 2, 3)]
 
 
 def test_collate_pixel_set_batch_pads_variable_pixel_counts():

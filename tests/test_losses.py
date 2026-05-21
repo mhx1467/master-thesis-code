@@ -1,6 +1,7 @@
 import torch
 
 from hsi_compression.losses import SymbolCodeLengthLoss, build_loss
+from hsi_compression.metrics import ref_ssim
 
 
 def test_symbol_code_length_loss_prefers_zero_integer_residual():
@@ -43,3 +44,11 @@ def test_build_loss_accepts_symbol_code_length_kwargs():
 
     assert isinstance(loss_fn, SymbolCodeLengthLoss)
     assert loss_fn.select_by_loss is True
+
+
+def test_ref_ssim_handles_small_spatial_inputs():
+    x = torch.ones(1, 4, 4, 4)
+
+    score = ref_ssim(x, x, channels=4)
+
+    assert torch.isfinite(score)

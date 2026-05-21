@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,11 @@ from hsi_compression.downstream import (
 )
 from hsi_compression.downstream.hyperview2 import load_array, load_mask, normalize_cube
 from hsi_compression.engine.checkpointing import load_checkpoint
+from hsi_compression.metrics import (
+    compute_actual_bpppc_from_strings,
+    compute_compression_ratio_from_bpppc,
+    compute_true_bpppc,
+)
 from hsi_compression.models.registry import build_model
 from hsi_compression.paths import artifacts_root
 from hsi_compression.utils import load_project_env
@@ -119,7 +125,11 @@ def _build_compressor(checkpoint_path: Path, in_channels: int, device: torch.dev
     cfg = ckpt_raw.get("config", {})
     model_section = cfg.get("model", {})
     model_name = model_section.get("model_name")
-    model_kwargs = model_section.get("model_kwargs", {})
+    model_kwargs = {
+        key: value
+        for key, value in model_section.get("model_kwargs", {}).items()
+        if key != "in_channels"
+    }
     if not model_name:
         raise ValueError(f"Could not find model.model_name in checkpoint: {checkpoint_path}")
 
@@ -149,17 +159,17 @@ def _pad_spatial(x: torch.Tensor, multiple: int) -> tuple[torch.Tensor, tuple[in
     return F.pad(x, (0, pad_w, 0, pad_h), mode="replicate"), (h, w)
 
 
-def _call_forward(model, x: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+def _call_forward(model, x: torch.Tensor, mask: torch.Tensor | None) -> dict[str, Any]:
     try:
         outputs = model(x, valid_mask=mask)
     except TypeError:
         outputs = model(x)
     if not isinstance(outputs, dict) or "x_hat" not in outputs:
         raise RuntimeError("Compressor forward output must be a dict containing x_hat.")
-    return outputs["x_hat"].float()
+    return outputs
 
 
-def _call_actual(model, x: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+def _call_actual(model, x: torch.Tensor, mask: torch.Tensor | None) -> tuple[dict[str, Any], dict]:
     try:
         packed = model.compress(x, valid_mask=mask)
     except TypeError:
@@ -173,7 +183,7 @@ def _call_actual(model, x: torch.Tensor, mask: torch.Tensor | None) -> torch.Ten
         outputs = model.decompress(**kwargs)
     if not isinstance(outputs, dict) or "x_hat" not in outputs:
         raise RuntimeError("Compressor decompress output must be a dict containing x_hat.")
-    return outputs["x_hat"].float()
+    return outputs, packed
 
 
 @torch.no_grad()
@@ -184,7 +194,7 @@ def reconstruct_cube(
     device: torch.device,
     pad_multiple: int,
     mode: str,
-) -> np.ndarray:
+) -> tuple[np.ndarray, dict[str, Any]]:
     x = torch.from_numpy(cube).unsqueeze(0).to(device=device, dtype=torch.float32)
     mask = None
     if mask_np is not None:
@@ -195,12 +205,116 @@ def reconstruct_cube(
     if mask is not None:
         mask_pad, _ = _pad_spatial(mask.float(), pad_multiple)
         mask_pad = mask_pad.bool()
+    info: dict[str, Any] = {
+        "original_shape": tuple(x.shape),
+        "padded_shape": tuple(x_pad.shape),
+        "actual_bpppc": None,
+        "actual_compression_ratio": None,
+        "likelihood_bpppc": None,
+    }
     if mode == "actual":
-        x_hat = _call_actual(model, x_pad, mask_pad)
+        outputs, packed = _call_actual(model, x_pad, mask_pad)
+        x_hat = outputs["x_hat"].float()
+        strings = packed.get("strings")
+        if strings is not None:
+            actual_bpppc = compute_actual_bpppc_from_strings(strings, tuple(x.shape))
+            info["actual_bpppc"] = float(actual_bpppc)
+            info["actual_compression_ratio"] = compute_compression_ratio_from_bpppc(actual_bpppc)
     else:
-        x_hat = _call_forward(model, x_pad, mask_pad)
+        outputs = _call_forward(model, x_pad, mask_pad)
+        x_hat = outputs["x_hat"].float()
+        likelihoods = outputs.get("likelihoods")
+        if likelihoods is not None:
+            info["likelihood_bpppc"] = float(compute_true_bpppc(likelihoods, tuple(x.shape)))
     x_hat = x_hat[..., :h, :w].clamp(0.0, 1.0)
-    return x_hat.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    return x_hat.squeeze(0).detach().cpu().numpy().astype(np.float32), info
+
+
+def _cube_reconstruction_stats(
+    original: np.ndarray,
+    reconstructed: np.ndarray,
+    mask: np.ndarray | None,
+) -> dict[str, float]:
+    if original.shape != reconstructed.shape:
+        raise ValueError(
+            f"Shape mismatch: original={original.shape}, reconstructed={reconstructed.shape}"
+        )
+    c, h, w = original.shape
+    if mask is not None:
+        valid_pixels = mask.reshape(h * w).astype(bool)
+    else:
+        flat_original = original.reshape(c, h * w)
+        flat_reconstructed = reconstructed.reshape(c, h * w)
+        valid_pixels = np.isfinite(flat_original).all(axis=0) & np.isfinite(flat_reconstructed).all(
+            axis=0
+        )
+    diff = (
+        reconstructed.reshape(c, h * w)[:, valid_pixels]
+        - original.reshape(c, h * w)[:, valid_pixels]
+    )
+    if diff.size == 0:
+        return {
+            "num_values": 0.0,
+            "sse": 0.0,
+            "sae": 0.0,
+            "sam_sum_deg": 0.0,
+            "sam_count": 0.0,
+        }
+
+    original_valid = original.reshape(c, h * w)[:, valid_pixels]
+    reconstructed_valid = reconstructed.reshape(c, h * w)[:, valid_pixels]
+    dot = np.sum(original_valid * reconstructed_valid, axis=0)
+    denom = np.linalg.norm(original_valid, axis=0) * np.linalg.norm(reconstructed_valid, axis=0)
+    cos = np.clip(dot / np.maximum(denom, 1e-12), -1.0 + 1e-7, 1.0 - 1e-7)
+    sam_deg = np.degrees(np.arccos(cos))
+    return {
+        "num_values": float(diff.size),
+        "sse": float(np.sum(diff**2)),
+        "sae": float(np.sum(np.abs(diff))),
+        "sam_sum_deg": float(np.sum(sam_deg)),
+        "sam_count": float(sam_deg.size),
+    }
+
+
+def _finalize_reconstruction_metrics(
+    totals: dict[str, float],
+    reconstruction_infos: list[dict[str, Any]],
+) -> dict[str, Any]:
+    num_values = max(float(totals["num_values"]), 1.0)
+    mse = totals["sse"] / num_values
+    mae = totals["sae"] / num_values
+    sam_count = max(float(totals["sam_count"]), 1.0)
+    actual_pairs = [
+        (info["actual_bpppc"], np.prod(info["original_shape"]))
+        for info in reconstruction_infos
+        if info.get("actual_bpppc") is not None
+    ]
+    likelihood_pairs = [
+        (info["likelihood_bpppc"], np.prod(info["original_shape"]))
+        for info in reconstruction_infos
+        if info.get("likelihood_bpppc") is not None
+    ]
+
+    def _weighted_bpppc(pairs: list[tuple[float, int]]) -> float | None:
+        if not pairs:
+            return None
+        weighted_bits = sum(float(bpppc) * int(values) for bpppc, values in pairs)
+        values_total = sum(int(values) for _, values in pairs)
+        return weighted_bits / max(values_total, 1)
+
+    actual_bpppc = _weighted_bpppc(actual_pairs)
+    likelihood_bpppc = _weighted_bpppc(likelihood_pairs)
+    return {
+        "mse": float(mse),
+        "mae": float(mae),
+        "psnr": float(10.0 * math.log10(1.0 / max(mse, 1e-12))),
+        "sam_deg": float(totals["sam_sum_deg"] / sam_count),
+        "num_values": int(totals["num_values"]),
+        "actual_bpppc": actual_bpppc,
+        "actual_compression_ratio": compute_compression_ratio_from_bpppc(actual_bpppc),
+        "likelihood_bpppc": likelihood_bpppc,
+        "likelihood_compression_ratio": compute_compression_ratio_from_bpppc(likelihood_bpppc),
+    }
 
 
 def _predict(
@@ -308,12 +422,20 @@ def main() -> int:
     reconstructed_pixel_items = []
     targets = []
     sample_ids = []
+    reconstruction_infos = []
+    reconstruction_totals = {
+        "num_values": 0.0,
+        "sse": 0.0,
+        "sae": 0.0,
+        "sam_sum_deg": 0.0,
+        "sam_count": 0.0,
+    }
     model_type = downstream["model_type"]
     for sample in tqdm(samples, desc="Reconstruct + extract downstream features"):
         cube_raw = load_array(sample.array_path, modality=modality)
         mask = load_mask(sample.mask_path, shape_hw=tuple(cube_raw.shape[-2:]))
         cube_norm = normalize_cube(cube_raw, mask=mask, mode=normalization)
-        reconstructed = reconstruct_cube(
+        reconstructed, reconstruction_info = reconstruct_cube(
             model=compressor,
             cube=cube_norm,
             mask_np=mask,
@@ -321,6 +443,10 @@ def main() -> int:
             pad_multiple=args.pad_multiple,
             mode=args.reconstruction_mode,
         )
+        reconstruction_infos.append(reconstruction_info)
+        sample_recon_stats = _cube_reconstruction_stats(cube_norm, reconstructed, mask)
+        for key, value in sample_recon_stats.items():
+            reconstruction_totals[key] += value
         if model_type == "spectral_set":
             original_pixel_items.append(
                 _cube_to_pixel_item(
@@ -401,6 +527,10 @@ def main() -> int:
         downstream["baseline_mse"],
         target_columns=cfg.get("target_columns", HYPERVIEW2_TARGET_COLUMNS),
     )
+    reconstruction_metrics = _finalize_reconstruction_metrics(
+        reconstruction_totals,
+        reconstruction_infos,
+    )
 
     result = {
         "dataset_root": str(args.dataset_root),
@@ -415,6 +545,7 @@ def main() -> int:
         "num_samples": len(samples),
         "original_metrics": original_metrics,
         "reconstructed_metrics": reconstructed_metrics,
+        "reconstruction_metrics": reconstruction_metrics,
         "delta_hyperview_score": float(
             reconstructed_metrics["hyperview_score"] - original_metrics["hyperview_score"]
         ),
@@ -429,12 +560,20 @@ def main() -> int:
                 "hyperview_score": original_metrics["hyperview_score"],
                 "mean_mse": original_metrics["mean_mse"],
                 "mean_mae": original_metrics["mean_mae"],
+                "reconstruction_psnr": None,
+                "reconstruction_sam_deg": None,
+                "actual_bpppc": None,
+                "actual_compression_ratio": None,
             },
             {
                 "condition": "reconstructed",
                 "hyperview_score": reconstructed_metrics["hyperview_score"],
                 "mean_mse": reconstructed_metrics["mean_mse"],
                 "mean_mae": reconstructed_metrics["mean_mae"],
+                "reconstruction_psnr": reconstruction_metrics["psnr"],
+                "reconstruction_sam_deg": reconstruction_metrics["sam_deg"],
+                "actual_bpppc": reconstruction_metrics["actual_bpppc"],
+                "actual_compression_ratio": reconstruction_metrics["actual_compression_ratio"],
             },
         ],
     )
@@ -443,6 +582,17 @@ def main() -> int:
         f"original={original_metrics['hyperview_score']:.6f} | "
         f"reconstructed={reconstructed_metrics['hyperview_score']:.6f} | "
         f"delta={result['delta_hyperview_score']:+.6f}"
+    )
+    bpppc = reconstruction_metrics["actual_bpppc"] or reconstruction_metrics["likelihood_bpppc"]
+    cr = (
+        reconstruction_metrics["actual_compression_ratio"]
+        or reconstruction_metrics["likelihood_compression_ratio"]
+    )
+    rate_msg = f" | bpppc={bpppc:.6f} | CR={cr:.4f}:1" if bpppc and cr else ""
+    print(
+        "Reconstruction: "
+        f"PSNR={reconstruction_metrics['psnr']:.4f}dB | "
+        f"SAM={reconstruction_metrics['sam_deg']:.4f}°{rate_msg}"
     )
     print(f"Saved: {json_path}")
     return 0
