@@ -176,7 +176,10 @@ class SpectralSetRegressor(nn.Module):
         head.append(nn.Linear(prev_dim, output_dim))
         self.head = nn.Sequential(*head)
 
-    def forward(self, pixels: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def encode_set(
+        self, pixels: torch.Tensor, valid_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Return the pooled set representation before the final regression head."""
         if pixels.ndim != 3:
             raise ValueError(f"Expected pixels with shape (B, N, C), got {tuple(pixels.shape)}")
         valid_mask = torch.isfinite(pixels).all(dim=-1) if valid_mask is None else valid_mask.bool()
@@ -203,7 +206,10 @@ class SpectralSetRegressor(nn.Module):
         valid_fraction = valid_mask.to(encoded.dtype).mean(dim=1, keepdim=True)
 
         pooled = torch.cat([attn_pool, mean_pool, valid_fraction], dim=1)
-        return self.head(pooled)
+        return pooled
+
+    def forward(self, pixels: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
+        return self.head(self.encode_set(pixels, valid_mask))
 
 
 def normalize_key(value: str) -> str:

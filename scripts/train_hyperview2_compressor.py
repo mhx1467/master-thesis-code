@@ -2,22 +2,25 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from hsi_compression.downstream import (
     HYPERVIEW2_TARGET_COLUMNS,
     Hyperview2CompressionDataset,
+    SpectralSetRegressor,
     build_hyperview2_samples,
     collate_compression_batch,
 )
 from hsi_compression.engine import fit
-from hsi_compression.losses import build_loss
+from hsi_compression.losses import RateDistortionLoss, build_loss
 from hsi_compression.models.registry import build_model
 from hsi_compression.paths import checkpoints_dir, ensure_artifact_dirs
 from hsi_compression.utils import (
@@ -115,6 +118,104 @@ def _build_loader(
         if prefetch_factor is not None:
             kwargs["prefetch_factor"] = prefetch_factor
     return DataLoader(dataset, **kwargs)
+
+
+def _cube_to_downstream_pixels(
+    cube: torch.Tensor,
+    mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if cube.ndim != 4:
+        raise ValueError(f"Expected cube with shape (B, C, H, W), got {tuple(cube.shape)}")
+    pixels = cube.permute(0, 2, 3, 1).reshape(cube.shape[0], -1, cube.shape[1])
+    if mask is None:
+        pixel_mask = torch.isfinite(pixels).all(dim=-1)
+    else:
+        pixel_mask = mask.bool().all(dim=1).reshape(cube.shape[0], -1)
+    return pixels, pixel_mask
+
+
+def _build_spectral_set_teacher(
+    downstream_checkpoint: dict[str, Any],
+    device: torch.device,
+) -> SpectralSetRegressor:
+    cfg = downstream_checkpoint.get("config", {})
+    model_type = cfg.get("model_type", "spectral_stats")
+    if model_type != "spectral_set":
+        raise ValueError(
+            "downstream_feature_rd currently requires a spectral_set downstream checkpoint. "
+            f"Got model_type={model_type!r}."
+        )
+    model = SpectralSetRegressor(
+        in_channels=int(cfg["in_channels"]),
+        output_dim=len(cfg.get("target_columns", HYPERVIEW2_TARGET_COLUMNS)),
+        hidden_dim=int(cfg["hidden_dim"]),
+        pixel_layers=int(cfg["pixel_layers"]),
+        head_layers=int(cfg["head_layers"]),
+        dropout=float(cfg["dropout"]),
+    )
+    model.load_state_dict(downstream_checkpoint["model_state_dict"])
+    model.to(device).eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+    return model
+
+
+class DownstreamFeatureRateDistortionLoss(RateDistortionLoss):
+    """Rate-distortion loss with frozen downstream representation consistency.
+
+    This is intentionally task-aware but validation-safe: the teacher is a frozen downstream
+    regressor and training still only uses the downstream train IDs selected above.
+    """
+
+    select_by_loss = True
+
+    def __init__(
+        self,
+        downstream_model: SpectralSetRegressor,
+        lmbda: float = 0.0001,
+        distortion_metric: str = "masked_mse",
+        feature_weight: float = 0.02,
+        prediction_weight: float = 0.2,
+    ):
+        super().__init__(lmbda=lmbda, distortion_metric=distortion_metric)
+        if feature_weight < 0.0:
+            raise ValueError("feature_weight must be non-negative")
+        if prediction_weight < 0.0:
+            raise ValueError("prediction_weight must be non-negative")
+        self.downstream_model = downstream_model
+        self.feature_weight = float(feature_weight)
+        self.prediction_weight = float(prediction_weight)
+
+    def forward(
+        self,
+        x_hat: torch.Tensor,
+        x: torch.Tensor,
+        mask: torch.Tensor | None,
+        likelihoods: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        D = self.distortion_fn(x_hat, x, mask)
+
+        num_values = x.numel()
+        bits = torch.log(likelihoods.clamp_min(1e-12)).sum() / -math.log(2.0)
+        R = bits / num_values
+
+        pixels_x, pixel_mask = _cube_to_downstream_pixels(x, mask)
+        pixels_hat, _ = _cube_to_downstream_pixels(x_hat, mask)
+        with torch.no_grad():
+            teacher_features = self.downstream_model.encode_set(pixels_x, pixel_mask).detach()
+            teacher_predictions = self.downstream_model.head(teacher_features).detach()
+        recon_features = self.downstream_model.encode_set(pixels_hat, pixel_mask)
+        recon_predictions = self.downstream_model.head(recon_features)
+
+        feature_loss = F.mse_loss(recon_features, teacher_features)
+        prediction_loss = F.mse_loss(recon_predictions, teacher_predictions)
+        loss = (
+            D
+            + self.lmbda * R
+            + self.feature_weight * feature_loss
+            + self.prediction_weight * prediction_loss
+        )
+        return loss, D, R
 
 
 def main() -> int:
@@ -285,6 +386,24 @@ def main() -> int:
             distortion_metric=distortion_metric,
         )
         print(f"Loss: Rate-Distortion (lambda={rd_lambda}, D={distortion_metric})")
+    elif loss_name == "downstream_feature_rd":
+        rd_lambda = float(training_cfg.get("rd_lambda", 0.0001))
+        distortion_metric = training_cfg.get("distortion_metric", "masked_mse")
+        feature_weight = float(training_cfg.get("feature_loss_weight", 0.02))
+        prediction_weight = float(training_cfg.get("prediction_loss_weight", 0.2))
+        downstream_teacher = _build_spectral_set_teacher(downstream_ckpt, device=device)
+        loss_fn = DownstreamFeatureRateDistortionLoss(
+            downstream_model=downstream_teacher,
+            lmbda=rd_lambda,
+            distortion_metric=distortion_metric,
+            feature_weight=feature_weight,
+            prediction_weight=prediction_weight,
+        )
+        print(
+            "Loss: DownstreamFeatureRD "
+            f"(lambda={rd_lambda}, D={distortion_metric}, feature_w={feature_weight}, "
+            f"pred_w={prediction_weight})"
+        )
     else:
         loss_fn = build_loss(loss_name, **loss_kwargs)
         print(f"Loss: {loss_name}")

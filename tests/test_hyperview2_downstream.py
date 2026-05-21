@@ -182,6 +182,18 @@ def test_spectral_set_regressor_forward_shape():
     assert y.shape == (4, 6)
 
 
+def test_spectral_set_regressor_encode_set_matches_head_input():
+    model = SpectralSetRegressor(in_channels=230, hidden_dim=16, pixel_layers=2, head_layers=2)
+    model.eval()
+    pixels = torch.randn(4, 5, 230)
+    valid_mask = torch.ones(4, 5, dtype=torch.bool)
+
+    pooled = model.encode_set(pixels, valid_mask)
+
+    assert pooled.shape == (4, 33)
+    torch.testing.assert_close(model(pixels, valid_mask), model.head(pooled))
+
+
 def test_to_chw_uses_expected_band_axis():
     hwc = np.zeros((4, 5, 230), dtype=np.float32)
     chw = to_chw(hwc, expected_bands=230)
