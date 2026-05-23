@@ -230,9 +230,13 @@ def infer_split(path: Path) -> str:
     name = path.name.lower()
     stem = path.stem.lower()
     tokens = parts | {name, stem}
-    if tokens & {"train", "training", "t"} or stem.startswith("train"):
+    if tokens & {"train", "training"} or stem == "t" or stem.startswith("train"):
         return "train"
-    if tokens & {"val", "valid", "validation", "v"} or stem.startswith(("val", "valid")):
+    if (
+        tokens & {"val", "valid", "validation"}
+        or stem == "v"
+        or stem.startswith(("val", "valid"))
+    ):
         return "validation"
     if tokens & {"test", "testing", "psi", "ψ"} or stem.startswith("test"):
         return "test"
