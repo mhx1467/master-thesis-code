@@ -3,7 +3,10 @@ import struct
 
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
+from hsi_compression.engine.validate import validate_one_epoch
+from hsi_compression.losses import MaskedMSELoss
 from hsi_compression.models.registry import build_model
 
 
@@ -199,3 +202,35 @@ def test_parallel_delta_residuals_match_sequential_predictor():
     sequential_residuals = (deltas - sequential_predictions).to(torch.int32)
 
     assert torch.equal(parallel_residuals, sequential_residuals)
+
+
+def test_lossless_validation_reports_actual_codec_metrics():
+    model = build_model(
+        "spectral_tcn_delta_lossless",
+        in_channels=6,
+        hidden_channels=8,
+        num_blocks=2,
+        raw_fallback=False,
+    )
+    x_int = torch.randint(0, 10001, (2, 6, 4, 4), dtype=torch.int32)
+    x = x_int.to(torch.float32) / 10000.0
+    loader = DataLoader([{"x": x[0], "valid_mask": torch.ones_like(x[0], dtype=torch.bool)}])
+
+    metrics = validate_one_epoch(
+        model=model,
+        loader=loader,
+        loss_fn=MaskedMSELoss(),
+        device=torch.device("cpu"),
+        show_progress=False,
+        compute_sam=False,
+        actual_codec_eval_batches=1,
+    )
+
+    assert metrics["actual_exact_reconstruction"] is True
+    assert metrics["actual_mismatch_count"] == 0
+    assert metrics["actual_max_abs_error"] == 0.0
+    assert metrics["actual_bpppc"] > 0.0
+    assert metrics["actual_compression_ratio"] is not None
+    assert metrics["actual_codec_batches"] == 1
+    assert metrics["encode_ms_per_batch"] is not None
+    assert metrics["decode_ms_per_batch"] is not None

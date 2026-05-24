@@ -4,6 +4,8 @@ import torch
 from tqdm.auto import tqdm
 
 from hsi_compression.metrics import (
+    compute_actual_bpppc_from_strings,
+    compute_compression_ratio_from_bpppc,
     compute_true_bpppc,
     invalid_region_mae,
     mae,
@@ -20,6 +22,28 @@ from hsi_compression.metrics import (
 )
 from hsi_compression.utils.distributed import is_main_process, reduce_mean
 
+ORIGINAL_BITS_PER_CHANNEL = 16.0
+
+
+def _call_model_compress(model, x: torch.Tensor, mask: torch.Tensor | None):
+    # newer models accept masks during compression, older baselines do not.
+    try:
+        return model.compress(x, valid_mask=mask)
+    except TypeError:
+        return model.compress(x)
+
+
+def _call_model_decompress(model, packed: dict):
+    kwargs = {"strings": packed["strings"], "shape": packed["shape"]}
+    if "z_shape" in packed and packed["z_shape"] is not None:
+        kwargs["z_shape"] = packed["z_shape"]
+    return model.decompress(**kwargs)
+
+
+def _supports_actual_compression(model) -> bool:
+    model_raw = model.module if hasattr(model, "module") else model
+    return bool(getattr(model_raw, "supports_actual_compression", False))
+
 
 @torch.no_grad()
 def validate_one_epoch(
@@ -32,6 +56,7 @@ def validate_one_epoch(
     show_progress: bool = True,
     compute_sam: bool = True,
     use_amp: bool = False,
+    actual_codec_eval_batches: int = 0,
 ):
     model.eval()
 
@@ -61,11 +86,18 @@ def validate_one_epoch(
         "proxy_bpppc": 0.0,
         "ref_bpppc": 0.0,
         "likelihood_bpppc": 0.0,
+        "actual_bpppc": 0.0,
     }
     num_batches = 0
+    actual_batches = 0
     latent_shape = None
     has_likelihoods = False
+    actual_mismatch_count = 0
+    actual_max_abs_error = 0.0
+    encode_times_ms = []
+    decode_times_ms = []
     start_time = time.perf_counter()
+    run_actual_codec = actual_codec_eval_batches > 0 and _supports_actual_compression(model)
 
     use_progress = show_progress and is_main_process()
     desc = f"Val {epoch}/{total_epochs}" + ("" if compute_sam else " (fast)")
@@ -172,10 +204,48 @@ def validate_one_epoch(
             totals["proxy_bpppc"] += model_proxy_bpppc
             totals["ref_bpppc"] += model_proxy_bpppc
 
+        if run_actual_codec and actual_batches < actual_codec_eval_batches:
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            encode_start = time.perf_counter()
+            packed = _call_model_compress(model, x, mask)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            encode_times_ms.append((time.perf_counter() - encode_start) * 1000.0)
+
+            if not isinstance(packed, dict) or "strings" not in packed or "shape" not in packed:
+                raise RuntimeError("model.compress() must return strings and shape")
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            decode_start = time.perf_counter()
+            decoded = _call_model_decompress(model, packed)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            decode_times_ms.append((time.perf_counter() - decode_start) * 1000.0)
+
+            if not isinstance(decoded, dict) or "x_hat" not in decoded:
+                raise RuntimeError("model.decompress() must return a dict containing 'x_hat'")
+
+            x_hat_actual = decoded["x_hat"].to(device=device, dtype=x.dtype)
+            actual_mismatch_count += int((x_hat_actual != x).sum().item())
+            actual_max_abs_error = max(
+                actual_max_abs_error,
+                float((x_hat_actual - x).abs().max().item()),
+            )
+            totals["actual_bpppc"] += compute_actual_bpppc_from_strings(
+                packed["strings"], tuple(x.shape)
+            )
+            actual_batches += 1
+
         if use_progress:
             postfix = {"loss": f"{loss_val.item():.5f}", "mPSNR": f"{masked_psnr_val.item():.2f}dB"}
             if compute_sam:
                 postfix["mSAM"] = f"{masked_sam_val.item():.2f}°"
+            if actual_batches:
+                avg_actual_bpppc = totals["actual_bpppc"] / actual_batches
+                postfix["act_bpppc"] = f"{avg_actual_bpppc:.4f}"
+                postfix["exact"] = str(actual_mismatch_count == 0)
             progress.set_postfix(postfix)
 
     n = max(num_batches, 1)
@@ -193,6 +263,31 @@ def validate_one_epoch(
     if not has_likelihoods:
         # keep the field explicit so downstream reports do not confuse missing rate estimates
         out["likelihood_bpppc"] = None
+    if actual_batches:
+        avg_actual_bpppc = totals["actual_bpppc"] / actual_batches
+        out["actual_bpppc"] = reduce_mean(avg_actual_bpppc, device)
+        out["actual_compression_ratio"] = compute_compression_ratio_from_bpppc(
+            out["actual_bpppc"], ORIGINAL_BITS_PER_CHANNEL
+        )
+        out["actual_exact_reconstruction"] = actual_mismatch_count == 0
+        out["actual_mismatch_count"] = actual_mismatch_count
+        out["actual_max_abs_error"] = actual_max_abs_error
+        out["actual_codec_batches"] = actual_batches
+        out["encode_ms_per_batch"] = (
+            sum(encode_times_ms) / len(encode_times_ms) if encode_times_ms else None
+        )
+        out["decode_ms_per_batch"] = (
+            sum(decode_times_ms) / len(decode_times_ms) if decode_times_ms else None
+        )
+    else:
+        out["actual_bpppc"] = None
+        out["actual_compression_ratio"] = None
+        out["actual_exact_reconstruction"] = None
+        out["actual_mismatch_count"] = None
+        out["actual_max_abs_error"] = None
+        out["actual_codec_batches"] = 0
+        out["encode_ms_per_batch"] = None
+        out["decode_ms_per_batch"] = None
     out["latent_shape"] = latent_shape
     out["epoch_time_sec"] = reduce_mean(time.perf_counter() - start_time, device)
     return out

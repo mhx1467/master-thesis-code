@@ -501,6 +501,8 @@ def main():
         in_channels=num_input_bands,
         **{k: v for k, v in model_kwargs.items() if k != "in_channels"},
     ).to(device)
+    model_raw = model.module if hasattr(model, "module") else model
+    compression_mode = getattr(model_raw, "compression_mode", "lossy")
 
     load_checkpoint(path=checkpoint_path, model=model, optimizer=None, map_location=device)
 
@@ -525,6 +527,44 @@ def main():
     print(f"  Samples:      {len(ds)}")
     print(f"  Params:       {num_params:,}")
     print(f"{'-' * 55}")
+    if compression_mode == "lossless":
+        print("  Lossless bitstream metrics")
+        print(
+            f"  Exact Recon:  {metrics['actual_exact_reconstruction']}"
+            if metrics["actual_exact_reconstruction"] is not None
+            else "  Exact Recon:  n/a"
+        )
+        print(
+            f"  Mismatches:   {metrics['actual_mismatch_count']}"
+            if metrics["actual_mismatch_count"] is not None
+            else "  Mismatches:   n/a"
+        )
+        print(
+            f"  Max |err|:    {metrics['actual_max_abs_error']:.8f}"
+            if metrics["actual_max_abs_error"] is not None
+            else "  Max |err|:    n/a"
+        )
+        print(
+            f"  Actual bpppc: {metrics['actual_bpppc']:.6f}"
+            if metrics["actual_bpppc"] is not None
+            else "  Actual bpppc: n/a"
+        )
+        print(
+            f"  Actual CR:    {metrics['actual_compression_ratio']:.4f}:1"
+            if metrics["actual_compression_ratio"] is not None
+            else "  Actual CR:    n/a"
+        )
+        print(
+            f"  Encode Time:  {metrics['encode_ms_per_batch']:.2f} ms / batch"
+            if metrics["encode_ms_per_batch"] is not None
+            else "  Encode Time:  n/a"
+        )
+        print(
+            f"  Decode Time:  {metrics['decode_ms_per_batch']:.2f} ms / batch"
+            if metrics["decode_ms_per_batch"] is not None
+            else "  Decode Time:  n/a"
+        )
+        print(f"{'-' * 55}")
     print("  Reference metrics")
     print(f"  PSNR:         {metrics['psnr']:.4f} dB")
     print(f"  SSIM:         {metrics['ssim']:.4f}")
@@ -620,6 +660,7 @@ def main():
         "checkpoint_path": str(checkpoint_path),
         "split": args.split,
         "difficulty": difficulty,
+        "compression_mode": compression_mode,
         "model_name": model_name,
         "num_samples": len(ds),
         "num_input_bands": num_input_bands,

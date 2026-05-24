@@ -18,6 +18,15 @@ def _select_best_by_loss(loss_fn) -> bool:
     return bool(hasattr(loss_fn, "lmbda") or getattr(loss_fn, "select_by_loss", False))
 
 
+def _is_lossless_model(model) -> bool:
+    model_raw = model.module if hasattr(model, "module") else model
+    return getattr(model_raw, "compression_mode", None) == "lossless"
+
+
+def _format_optional_float(value, fmt: str, missing: str = "n/a") -> str:
+    return format(value, fmt) if value is not None else missing
+
+
 def fit(
     model,
     train_loader,
@@ -44,6 +53,8 @@ def fit(
     best_val_loss = float("inf")
     best_val_ref_psnr = float("-inf")
     best_selection_metric = float("inf") if select_by_loss else float("-inf")
+    best_lossless_actual_bpppc = float("inf")
+    has_best_lossless_actual = False
     last_sam_deg = None
     prev_val_loss = None
     prev_val_psnr = None
@@ -80,6 +91,14 @@ def fit(
                 "best_selection_metric",
                 best_val_loss if select_by_loss else best_val_ref_psnr,
             )
+            best_lossless_actual_bpppc = ckpt.get("extra", {}).get(
+                "best_lossless_actual_bpppc",
+                float("inf"),
+            )
+            has_best_lossless_actual = ckpt.get("extra", {}).get(
+                "has_best_lossless_actual",
+                False,
+            )
             metric_msg = f"Best ref PSNR: {best_val_ref_psnr:.2f} dB"
             print(f"Resumed {start_epoch} | {metric_msg}\n")
         elif is_main_process():
@@ -88,6 +107,9 @@ def fit(
     model_raw = model.module if hasattr(model, "module") else model
     # unwrap distributed wrappers before counting parameters or saving checkpoints.
     num_params = sum(p.numel() for p in model_raw.parameters() if p.requires_grad)
+    is_lossless = _is_lossless_model(model)
+    actual_codec_every = int(training_cfg.get("actual_codec_eval_every_n_epochs", 0) or 0)
+    actual_codec_batches = int(training_cfg.get("actual_codec_eval_batches", 0) or 0)
 
     for epoch in range(start_epoch, epochs + 1):
         if train_sampler is not None:
@@ -118,6 +140,12 @@ def fit(
 
         # sam is more expensive than mse or psnr, so it can be computed sparsely
         compute_sam = (epoch % sam_every_n_epochs == 0) or (epoch == epochs)
+        run_actual_codec = (
+            is_lossless
+            and actual_codec_every > 0
+            and actual_codec_batches > 0
+            and (epoch % actual_codec_every == 0 or epoch == epochs)
+        )
 
         val_metrics = validate_one_epoch(
             model=model,
@@ -129,6 +157,7 @@ def fit(
             show_progress=show_progress,
             compute_sam=compute_sam,
             use_amp=use_amp,
+            actual_codec_eval_batches=actual_codec_batches if run_actual_codec else 0,
         )
 
         if scheduler is not None:
@@ -177,6 +206,14 @@ def fit(
             "val/proxy_bpppc": val_metrics["proxy_bpppc"],
             "val/ref_bpppc": val_metrics["ref_bpppc"],
             "val/likelihood_bpppc": val_metrics["likelihood_bpppc"],
+            "val/actual_bpppc": val_metrics["actual_bpppc"],
+            "val/actual_compression_ratio": val_metrics["actual_compression_ratio"],
+            "val/actual_exact_reconstruction": val_metrics["actual_exact_reconstruction"],
+            "val/actual_mismatch_count": val_metrics["actual_mismatch_count"],
+            "val/actual_max_abs_error": val_metrics["actual_max_abs_error"],
+            "val/actual_codec_batches": val_metrics["actual_codec_batches"],
+            "val/encode_ms_per_batch": val_metrics["encode_ms_per_batch"],
+            "val/decode_ms_per_batch": val_metrics["decode_ms_per_batch"],
             "val/epoch_time_sec": val_metrics["epoch_time_sec"],
             "model/num_params": num_params,
         }
@@ -206,17 +243,38 @@ def fit(
             val_loss_delta_str = f"{val_loss_delta:+.8f}" if val_loss_delta is not None else "n/a"
             val_psnr_delta_str = f"{val_psnr_delta:+.8f}" if val_psnr_delta is not None else "n/a"
             val_ssim_delta_str = f"{val_ssim_delta:+.8f}" if val_ssim_delta is not None else "n/a"
-            print(
-                f"  train mPSNR={record['train/masked_psnr']:.4f}dB | "
-                f"val loss={record['val/loss']:.6f} | "
-                f"val ref PSNR={record['val/psnr']:.5f}dB | "
-                f"val ref SSIM={record['val/ssim']:.6f} | "
-                f"val dLoss={val_loss_delta_str} | "
-                f"val dPSNR={val_psnr_delta_str} | "
-                f"val dSSIM={val_ssim_delta_str} | "
-                f"val mSAM={masked_sam_str} | "
-                f"proxy_bpppc={record['val/proxy_bpppc']:.4f}"
-            )
+            if is_lossless:
+                exact = record["val/actual_exact_reconstruction"]
+                exact_str = str(exact) if exact is not None else "n/a"
+                mismatch_str = (
+                    str(record["val/actual_mismatch_count"])
+                    if record["val/actual_mismatch_count"] is not None
+                    else "n/a"
+                )
+                print(
+                    f"  val loss={record['val/loss']:.6f} | "
+                    f"actual exact={exact_str} | "
+                    f"mismatches={mismatch_str} | "
+                    f"max|err|={_format_optional_float(record['val/actual_max_abs_error'], '.8f')} | "
+                    f"actual_bpppc={_format_optional_float(record['val/actual_bpppc'], '.6f')} | "
+                    f"actual CR={_format_optional_float(record['val/actual_compression_ratio'], '.4f')} | "
+                    f"codec_batches={record['val/actual_codec_batches']} | "
+                    f"val dLoss={val_loss_delta_str} | "
+                    f"diag ref PSNR={record['val/psnr']:.5f}dB | "
+                    f"diag ref SSIM={record['val/ssim']:.6f}"
+                )
+            else:
+                print(
+                    f"  train mPSNR={record['train/masked_psnr']:.4f}dB | "
+                    f"val loss={record['val/loss']:.6f} | "
+                    f"val ref PSNR={record['val/psnr']:.5f}dB | "
+                    f"val ref SSIM={record['val/ssim']:.6f} | "
+                    f"val dLoss={val_loss_delta_str} | "
+                    f"val dPSNR={val_psnr_delta_str} | "
+                    f"val dSSIM={val_ssim_delta_str} | "
+                    f"val mSAM={masked_sam_str} | "
+                    f"proxy_bpppc={record['val/proxy_bpppc']:.4f}"
+                )
             prev_val_loss = record["val/loss"]
             prev_val_psnr = record["val/psnr"]
             prev_val_ssim = record["val/ssim"]
@@ -237,7 +295,23 @@ def fit(
 
             val_loss = record["val/loss"]
             val_ref_psnr = record["val/psnr"]
-            if select_by_loss:
+            if is_lossless:
+                actual_bpppc = record["val/actual_bpppc"]
+                exact_actual = record["val/actual_exact_reconstruction"]
+                if actual_bpppc is not None and exact_actual:
+                    selection_metric = actual_bpppc
+                    improved = selection_metric < best_lossless_actual_bpppc
+                    if improved:
+                        best_lossless_actual_bpppc = selection_metric
+                        has_best_lossless_actual = True
+                elif has_best_lossless_actual:
+                    selection_metric = best_lossless_actual_bpppc
+                    improved = False
+                else:
+                    # before the first successful bitstream check, use the training objective.
+                    selection_metric = val_loss
+                    improved = selection_metric < best_selection_metric
+            elif select_by_loss:
                 selection_metric = val_loss
                 improved = selection_metric < best_selection_metric
             else:
@@ -264,11 +338,27 @@ def fit(
                         "best_val_proxy_bpppc": record["val/proxy_bpppc"],
                         "best_val_ref_bpppc": record["val/ref_bpppc"],
                         "best_val_likelihood_bpppc": record["val/likelihood_bpppc"],
+                        "best_val_actual_bpppc": record["val/actual_bpppc"],
+                        "best_val_actual_compression_ratio": record["val/actual_compression_ratio"],
+                        "best_val_actual_exact_reconstruction": record[
+                            "val/actual_exact_reconstruction"
+                        ],
+                        "best_val_actual_mismatch_count": record["val/actual_mismatch_count"],
+                        "best_val_actual_max_abs_error": record["val/actual_max_abs_error"],
+                        "best_lossless_actual_bpppc": best_lossless_actual_bpppc,
+                        "has_best_lossless_actual": has_best_lossless_actual,
                         "best_val_ssim": record["val/ssim"],
                         "val_masked_sam_deg": last_sam_deg,
                     },
                 )
-                if select_by_loss:
+                if is_lossless and record["val/actual_bpppc"] is not None:
+                    print(
+                        "New best lossless bitstream "
+                        f"(actual_bpppc={record['val/actual_bpppc']:.6f}, "
+                        f"exact={record['val/actual_exact_reconstruction']}, "
+                        f"mismatches={record['val/actual_mismatch_count']})"
+                    )
+                elif select_by_loss:
                     print(
                         f"New best validation loss ({best_val_loss:.6f}, "
                         f"ref PSNR={best_val_ref_psnr:.2f} dB)"
@@ -287,6 +377,19 @@ def fit(
                     logger.summary["best_val_proxy_bpppc"] = record["val/proxy_bpppc"]
                     logger.summary["best_val_ref_bpppc"] = record["val/ref_bpppc"]
                     logger.summary["best_val_likelihood_bpppc"] = record["val/likelihood_bpppc"]
+                    logger.summary["best_val_actual_bpppc"] = record["val/actual_bpppc"]
+                    logger.summary["best_val_actual_compression_ratio"] = record[
+                        "val/actual_compression_ratio"
+                    ]
+                    logger.summary["best_val_actual_exact_reconstruction"] = record[
+                        "val/actual_exact_reconstruction"
+                    ]
+                    logger.summary["best_val_actual_mismatch_count"] = record[
+                        "val/actual_mismatch_count"
+                    ]
+                    logger.summary["best_val_actual_max_abs_error"] = record[
+                        "val/actual_max_abs_error"
+                    ]
                     logger.summary["best_selection_metric"] = best_selection_metric
                     logger.summary["best_epoch"] = epoch
 
@@ -306,6 +409,13 @@ def fit(
                             "val_proxy_bpppc": record["val/proxy_bpppc"],
                             "val_ref_bpppc": record["val/ref_bpppc"],
                             "val_likelihood_bpppc": record["val/likelihood_bpppc"],
+                            "val_actual_bpppc": record["val/actual_bpppc"],
+                            "val_actual_compression_ratio": record["val/actual_compression_ratio"],
+                            "val_actual_exact_reconstruction": record[
+                                "val/actual_exact_reconstruction"
+                            ],
+                            "val_actual_mismatch_count": record["val/actual_mismatch_count"],
+                            "val_actual_max_abs_error": record["val/actual_max_abs_error"],
                             "latent_shape": str(latent_shape),
                         },
                     )
