@@ -40,6 +40,7 @@ class HSITiffDataset(Dataset):
         first_path = self.paths[0]
         self._use_npy = first_path.suffix.lower() == ".npy"
         if self._use_npy:
+            # benchmark arrays may be stored in either channel first or channel last layout
             sample = np.load(str(first_path), mmap_mode="r")
             if sample.shape == _NPY_SHAPE_CHW:
                 self._npy_is_chw = True
@@ -51,6 +52,7 @@ class HSITiffDataset(Dataset):
                     "Expected (202, 128, 128) or (128, 128, 202)."
                 )
         elif prefer_npy:
+            # reference-comparable runs should fail early if they accidentally point to raw tif files.
             raise ValueError(
                 "Benchmark dataset path resolved to TIF files. "
                 "Train/val/test benchmark runs must use preprocessed '*-DATA.npy' artifacts."
@@ -66,8 +68,10 @@ class HSITiffDataset(Dataset):
         if self._use_npy:
             x = self._load_npy(path)
             if not x.flags.writeable:
+                # torch warns on read only numpy views, so make a writable copy before conversion
                 x = np.array(x, copy=True)
             if x.dtype != np.float32 or not x.flags.c_contiguous:
+                # models expect contiguous float32 tensors, so normalize the array layout here.
                 x = np.ascontiguousarray(x, dtype=np.float32)
             x_tensor = torch.from_numpy(x)
             mask_tensor = self._build_mask_for_npy(x_tensor)
@@ -102,11 +106,12 @@ class HSITiffDataset(Dataset):
         return x_tensor
 
     def _build_mask_for_npy(self, x_tensor: torch.Tensor) -> torch.Tensor:
-        # HySpecNet benchmark DATA.npy artifacts are already preprocessed to 202 valid bands.
+        # benchmark data.npy artifacts are already preprocessed to valid spectral bands
         return torch.ones_like(x_tensor, dtype=torch.bool)
 
     def _load_npy(self, npy_path: Path):
         data = np.load(str(npy_path), mmap_mode="r" if self.npy_mmap else None)
+        # convert channel-last files to the channel-first tensor convention used by pytorch.
         return data if self._npy_is_chw else data.transpose(2, 0, 1)
 
     def _load_tif(self, path: Path):
@@ -114,18 +119,22 @@ class HSITiffDataset(Dataset):
         if x.ndim != 3:
             raise ValueError(f"Expected 3D tensor, got {x.shape} for {path}")
 
+        # tif input is a raw path, so nodata and invalid bands must be handled here
         valid_mask = x != self.nodata_value
         if self.invalid_channels:
             valid_mask[self.invalid_channels] = False
 
         x = x.astype(np.float32)
+        # invalid raw sensor values are replaced before clipping and normalization.
         x[~valid_mask] = self.replace_nodata_with
 
         if self.drop_invalid_channels and self.invalid_channels:
+            # dropping invalid bands changes the spectral channel count to the benchmark count.
             keep = [i for i in range(x.shape[0]) if i not in self.invalid_channels]
             x = x[keep]
             valid_mask = valid_mask[keep]
 
+        # keep tif preprocessing aligned with the benchmark data.npy conversion
         x = np.clip(x, GLOBAL_MIN, GLOBAL_MAX)
         x = x / (GLOBAL_MAX - GLOBAL_MIN)
 

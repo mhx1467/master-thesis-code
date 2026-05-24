@@ -1,31 +1,62 @@
 # HSI Compression
 
-Master thesis codebase for hyperspectral image compression experiments on HySpecNet-11k.
+PyTorch research codebase for hyperspectral image compression experiments.
+The repository provides data loading, model definitions, training, evaluation,
+and utility scripts used to run experiments on HySpecNet-11k and related HSI
+workflows.
+
+## Repository Layout
+
+```text
+src/hsi_compression/     package code: data, models, metrics, training
+configs/                 YAML experiment configurations
+scripts/                 core training, evaluation, conversion, and analysis scripts
+tests/                   tests for data, models, metrics, and protocols
+docs/                    technical notes and protocol documentation
+summaries/               experiment summaries
+artifacts/               local outputs, checkpoints, and analyses
+```
+
+`artifacts/`, `dataset/`, and `wandb/` are local runtime directories and should
+not be treated as source files.
+
+## Requirements
+
+- Python `3.10+`
+- PyTorch
+- HySpecNet-11k for the main benchmark workflow
+
+Optional dependency groups:
+
+- `mamba` for Mamba-based models,
+- `lossless` for lossless codec experiments,
+- `dev` for formatting and linting tools.
 
 ## Setup
 
 ```bash
-pip install -e .
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e '.[dev]'
 ```
 
-## Example usage
+Install optional extras when needed:
 
 ```bash
-python scripts/train.py --config configs/baseline_2d/baseline_2d_ae.yaml
+pip install -e '.[mamba,dev]'
+pip install -e '.[lossless,dev]'
 ```
 
-Training and evaluation use a single benchmark-aligned HySpecNet-11k pipeline:
-- split files are consumed as published by HySpecNet-11k
-- benchmark train/eval inputs are loaded only from `patches/...-DATA.npy`
-- if you only have `*-SPECTRAL_IMAGE.TIF`, convert them to `*-DATA.npy` before any benchmark run
+## Data
 
-Evaluation reports:
-- reference metrics for comparison with HySpecNet: `PSNR`, `SSIM`, `SA`, `bpppc`
-- additional diagnostics for local analysis: masked metrics and actual bitstream metrics
+Set the dataset root:
 
-## Dataset Preparation
+```bash
+export DATASET_ROOT=/path/to/hyspecnet-11k
+```
 
-After downloading and extracting HySpecNet-11k, point the project to the dataset root that contains at least:
+Expected HySpecNet-11k layout:
 
 ```text
 <DATASET_ROOT>/
@@ -41,95 +72,87 @@ After downloading and extracting HySpecNet-11k, point the project to the dataset
       test.csv
 ```
 
-Expected split entries are relative paths inside `patches/`, exactly as provided by HySpecNet-11k, for example
-`TILE/PATCH/PATCH-DATA.npy`.
+Benchmark runs expect `patches/...-DATA.npy` files with shape
+`(202, 128, 128)`, dtype `float32`, and values normalized to `[0, 1]`.
 
-Set the dataset path:
+If the dataset contains only `*-SPECTRAL_IMAGE.TIF`, convert it first:
 
 ```bash
-export DATASET_ROOT=/path/to/hyspecnet-11k-full
+python scripts/convert_tif_to_npy.py "$DATASET_ROOT" --workers 8 --verify
 ```
 
-If the downloaded dataset already contains `patches/...-DATA.npy`, no extra preprocessing is needed.
-
-If the dataset contains only `...-SPECTRAL_IMAGE.TIF`, generate benchmark-compatible `DATA.npy` files:
+## Training
 
 ```bash
-python scripts/convert_tif_to_npy.py $DATASET_ROOT --workers 8 --verify
+python scripts/train.py \
+  --config configs/mamba/hierarchical_spectral_mamba_ae_latent96.yaml \
+  --dataset-root "$DATASET_ROOT"
 ```
 
-This conversion applies the HySpecNet reference preprocessing:
-- remove the 22 invalid water-vapor bands
-- clip values to `0..10000`
-- normalize to `[0,1]`
-- save `float32` arrays in `(202, 128, 128)` format
-
-Quick checks:
+Useful options:
 
 ```bash
-find $DATASET_ROOT/patches -type f -name '*-DATA.npy' | head
-find $DATASET_ROOT/splits/easy -maxdepth 1 -type f
+--disable-wandb
+--resume
+--pretrained <checkpoint>
+--override-rd-lambda <value>
+--override-lr <value>
+--override-epochs <value>
+--override-experiment-name <name>
 ```
 
-You can then train or evaluate directly:
+## Evaluation
 
 ```bash
-python scripts/train.py --config configs/baseline_2d/baseline_2d_ae.yaml --dataset-root $DATASET_ROOT
-python scripts/evaluate.py artifacts/checkpoints/<checkpoint>.pt $DATASET_ROOT --split test --save-json
-```
-
-## VM Management
-
-Create/update VM definitions in `configs/misc/vms.yaml`.
-
-Each VM entry supports:
-- `name`
-- `host`
-- `ssh_key_path`
-- `port` (optional, defaults to `22`)
-- `user` (optional)
-- `dataset_path` (optional, used by `copy-dataset`)
-- `remote_project_dir` (optional, used by `prepare-environment`)
-
-Run commands via the CLI:
-
-```bash
-hsi-vm list
-hsi-vm show gpu-a100
-hsi-vm ssh gpu-a100
-hsi-vm run gpu-a100 copy-dataset
-hsi-vm run gpu-a100 prepare-environment --python-version 3.10
-```
-
-The predefined command scripts are now under `scripts/commands/`:
-- `scripts/commands/copy-data-set-to-vm.sh`
-- `scripts/commands/prepare-environment-on-vm.sh`
-
-Compatibility wrappers remain at:
-- `scripts/copy-data-set-to-vm.sh`
-- `scripts/prepare-environment-on-vm.sh`
-
-##### Evaluation `val`
-```bash
-python scripts/evaluate.py artifacts/checkpoints/baseline_2d_ae_easy_train256_val64_latent16_masked_mse.pt \
-  $DATASET_ROOT \
-  --split val \
-  --save-json
-```
-
-##### Evaluation `test`
-```bash
-python scripts/evaluate.py artifacts/checkpoints/baseline_2d_ae_easy_train256_val64_latent16_masked_mse.pt \
-  $DATASET_ROOT \
+python scripts/evaluate.py \
+  artifacts/checkpoints/<checkpoint>.pt \
+  "$DATASET_ROOT" \
   --split test \
+  --difficulty easy \
   --save-json
 ```
 
-##### Evaluation debug
+Debug on a small subset:
+
 ```bash
-python scripts/evaluate.py artifacts/checkpoints/baseline_2d_ae_easy_train256_val64_latent16_masked_mse.pt \
-  $DATASET_ROOT \
+python scripts/evaluate.py \
+  artifacts/checkpoints/<checkpoint>.pt \
+  "$DATASET_ROOT" \
   --split val \
+  --difficulty easy \
   --subset-size 32 \
   --disable-wandb
 ```
+
+## Common Scripts
+
+```text
+scripts/train.py                                  train compression models
+scripts/evaluate.py                               evaluate checkpoints
+scripts/convert_tif_to_npy.py                     prepare HySpecNet DATA.npy files
+scripts/export_reconstruction_qualitative.py      export qualitative reconstructions
+scripts/evaluate_lossless_codecs.py               evaluate lossless codecs
+scripts/audit_lossless_tcn_protocol.py            audit lossless TCN protocol
+```
+
+## Code Quality
+
+```bash
+make lint
+make check-format
+pytest
+```
+
+Apply formatting:
+
+```bash
+make format
+```
+
+## Notes
+
+- Keep benchmark runs on the official HySpecNet-11k split files.
+- Do not mix generated artifacts, checkpoints, datasets, or W&B outputs into
+  ordinary code changes.
+- Record the config, checkpoint, dataset split, and git commit for reported
+  experiment results.

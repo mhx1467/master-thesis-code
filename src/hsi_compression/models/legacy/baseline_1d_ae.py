@@ -48,7 +48,7 @@ class Baseline1DAutoencoder(nn.Module):
         _, _, h, w = x_ds.shape
 
         seq = x_ds.permute(0, 2, 3, 1).reshape(n * h * w, 1, c)
-        z = self.spectral_encoder(seq)  # (N·H·W, lc, latent_len)
+        z = self.spectral_encoder(seq)  # one latent spectrum per low-resolution pixel
 
         lc, ll = z.shape[1], z.shape[2]
         return z.reshape(n, h, w, lc * ll).permute(0, 3, 1, 2).contiguous()
@@ -59,7 +59,7 @@ class Baseline1DAutoencoder(nn.Module):
         ll = ch // lc
 
         z_seq = z.permute(0, 2, 3, 1).reshape(n * h * w, lc, ll)
-        x_seq = self.spectral_decoder(z_seq)  # (N·H·W, 1, ~200)
+        x_seq = self.spectral_decoder(z_seq)  # one reconstructed spectrum per pixel
 
         curr_len = x_seq.shape[2]
         if curr_len < self.in_channels:
@@ -67,7 +67,7 @@ class Baseline1DAutoencoder(nn.Module):
         elif curr_len > self.in_channels:
             x_seq = x_seq[:, :, : self.in_channels]
 
-        x_seq = x_seq[:, 0, :]  # (N·H·W, C)
+        x_seq = x_seq[:, 0, :]  # remove the temporary conv1d channel dimension
         x_ds = x_seq.reshape(n, h, w, self.in_channels).permute(0, 3, 1, 2).contiguous()
 
         return self.spatial_decoder(x_ds)

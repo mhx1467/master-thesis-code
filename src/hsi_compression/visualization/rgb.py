@@ -25,12 +25,12 @@ def _ensure_chw(x: np.ndarray, channel_first: bool | None = None) -> np.ndarray:
     if channel_first is False:
         return np.transpose(x, (2, 0, 1))
 
-    # Auto-detect
-    # Heuristic: if first dim is relatively small, assume CHW
+    # auto-detect layout using the expected size of the spectral dimension
+    # if the first dimension is relatively small, assume channel-first layout
     if x.shape[0] <= 256 and x.shape[1] > 16 and x.shape[2] > 16:
         return x
 
-    # Otherwise assume HWC
+    # otherwise assume channel-last layout
     return np.transpose(x, (2, 0, 1))
 
 
@@ -48,6 +48,7 @@ def _normalize_channel(
     else:
         valid = channel.reshape(-1)
 
+    # percentile stretch makes pseudo-rgb robust to a few very bright or dark pixels.
     lo = np.percentile(valid, p_low)
     hi = np.percentile(valid, p_high)
 
@@ -89,6 +90,7 @@ def hsi_to_rgb(
         raise ValueError(f"Mask shape must be {(h, w)}, got {mask_np.shape}")
 
     p_low, p_high = percentile_stretch
+    # each display channel is stretched independently for a visible pseudo-rgb image.
     r = _normalize_channel(x_chw[r_idx], mask=mask_np, p_low=p_low, p_high=p_high)
     g = _normalize_channel(x_chw[g_idx], mask=mask_np, p_low=p_low, p_high=p_high)
     b = _normalize_channel(x_chw[b_idx], mask=mask_np, p_low=p_low, p_high=p_high)
@@ -97,6 +99,7 @@ def hsi_to_rgb(
     rgb = _apply_gamma(rgb, gamma=gamma)
 
     if mask_np is not None:
+        # invalid pixels are shown as black so they do not look like reconstructed signal.
         rgb = rgb.copy()
         rgb[~mask_np] = 0.0
 
@@ -218,6 +221,7 @@ def choose_evenly_spaced_rgb_bands(num_bands: int) -> tuple[int, int, int]:
     if num_bands < 3:
         raise ValueError("num_bands must be >= 3")
 
+    # choose three rough positions because hsi bands are not always mapped to real rgb wavelengths.
     b = int(round(0.25 * (num_bands - 1)))
     g = int(round(0.50 * (num_bands - 1)))
     r = int(round(0.75 * (num_bands - 1)))

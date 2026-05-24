@@ -46,7 +46,7 @@ class SpectralMambaBackbone(nn.Module):
         self.pool = SpectralAttentionPooling(spectral_d_model, spectral_out_channels)
 
     def forward(self, x_spec: torch.Tensor) -> torch.Tensor:
-        # (B, C, 32, 32) -> (B*32*32, C, 1)
+        # convert each low-resolution pixel spectrum into a token sequence
         seq = rearrange(x_spec, "b c h w -> (b h w) c 1")
         seq = self.input_proj(seq)
         for block in self.blocks:
@@ -76,6 +76,7 @@ class SpectralFirstMambaAutoencoder(nn.Module):
         self.in_channels = in_channels
         self.latent_channels = latent_channels
 
+        # spatial downsample keeps bands separate before the spectral mamba backbone.
         self.spectral_downsample = SpectralPreservingDownsample(in_channels=in_channels)
         self.spectral_backbone = SpectralMambaBackbone(
             in_channels=in_channels,
@@ -88,6 +89,7 @@ class SpectralFirstMambaAutoencoder(nn.Module):
             dropout=dropout,
         )
         self.spatial_context = SpatialContextEncoder(
+            # spatial context is learned in parallel from the original cube.
             in_channels=in_channels,
             embed_channels=spatial_embed_channels,
             context_channels=spatial_context_channels,
@@ -97,7 +99,11 @@ class SpectralFirstMambaAutoencoder(nn.Module):
             use_affine_bias=use_affine_conditioning,
         )
         self.late_bottleneck = nn.Conv2d(
-            spectral_out_channels, latent_channels, kernel_size=1, bias=True
+            # one by one convolution converts fused features into latent channels.
+            spectral_out_channels,
+            latent_channels,
+            kernel_size=1,
+            bias=True,
         )
         self.entropy_bottleneck = EntropyBottleneck(latent_channels)
         self.decoder = SpectralFirstDecoder(
@@ -115,6 +121,7 @@ class SpectralFirstMambaAutoencoder(nn.Module):
             raise ValueError("output_activation must be one of: 'sigmoid', 'identity', None")
 
     def encode_features(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # return intermediate features so older analysis code can inspect each branch.
         x_spec = self.spectral_downsample(x)
         f_spec = self.spectral_backbone(x_spec)
         f_spat = self.spatial_context(x)
@@ -126,6 +133,7 @@ class SpectralFirstMambaAutoencoder(nn.Module):
         return self.late_bottleneck(f_joint)
 
     def decode(self, z_q: torch.Tensor) -> torch.Tensor:
+        # decoder reconstructs the cube, then a residual block refines spectral bands.
         x_pre = self.decoder(z_q)
         x_refined = self.spectral_refinement(x_pre)
         return self.output_activation(x_refined)

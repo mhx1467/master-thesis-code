@@ -87,6 +87,7 @@ def main():
 
     if args.override_experiment_name is not None:
         experiment_cfg["name"] = args.override_experiment_name
+    # command line overrides make rd sweeps possible without duplicating yaml files
     if args.override_rd_lambda is not None:
         training_cfg["rd_lambda"] = args.override_rd_lambda
     if args.override_lr is not None:
@@ -105,6 +106,7 @@ def main():
         sys.exit(1)
 
     set_seed(seed)
+    # create artifact directories before checkpointing or logging starts.
     ensure_artifact_dirs()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -132,6 +134,7 @@ def main():
     print(f"AMP enabled: {use_amp}")
 
     if device.type == "cuda":
+        # this helps diagnose whether batch size failures are caused by memory pressure.
         free_bytes, total_bytes = torch.cuda.mem_get_info()
         print(
             f"GPU memory before data/model: free={free_bytes / 1024**3:.2f} GiB / total={total_bytes / 1024**3:.2f} GiB"
@@ -159,11 +162,13 @@ def main():
     )
 
     if train_subset:
+        # subsets are intended for smoke tests and quick debugging only
         train_ds = Subset(train_ds, list(range(min(train_subset, len(train_ds)))))
     if val_subset:
         val_ds = Subset(val_ds, list(range(min(val_subset, len(val_ds)))))
 
     sample = train_ds[0]
+    # infer band count from data so configs do not duplicate dataset-specific channel numbers.
     sample_tensor = sample["x"] if isinstance(sample, dict) else torch.as_tensor(sample)
     num_input_bands = int(sample_tensor.shape[0])
     print(f"Input bands: {num_input_bands} | Train: {len(train_ds)} | Val: {len(val_ds)}")
@@ -172,6 +177,7 @@ def main():
 
     debug_loader_timing = data_cfg.get("debug_loader_timing", False)
     if debug_loader_timing:
+        # loader timing separates disk and host to gpu overhead from model compute
         warmup_batches = data_cfg.get("debug_loader_warmup_batches", 4)
         timed_batches = data_cfg.get("debug_loader_timed_batches", 16)
         total_batches = max(1, warmup_batches + timed_batches)
@@ -189,11 +195,13 @@ def main():
         load_times = []
         sync_times = []
         for step in range(total_batches):
+            # timing here measures only data loading before the model is involved.
             t0 = time.perf_counter()
             batch = next(iterator)
             t1 = time.perf_counter()
             x = batch["x"] if isinstance(batch, dict) else batch
             if device.type == "cuda":
+                # host to gpu copies can be a bottleneck when loading many hsi patches.
                 s0 = time.perf_counter()
                 _ = x.to(device, non_blocking=True)
                 torch.cuda.synchronize(device)
@@ -236,13 +244,17 @@ def main():
 
     model_name = model_cfg.get("model_name")
     model_kwargs = {
-        k: v for k, v in model_cfg.get("model_kwargs", {}).items() if k != "in_channels"
+        # in_channels is determined from the dataset to avoid mismatches with split protocol.
+        k: v
+        for k, v in model_cfg.get("model_kwargs", {}).items()
+        if k != "in_channels"
     }
     model = build_model(model_name=model_name, in_channels=num_input_bands, **model_kwargs).to(
         device
     )
 
     if getattr(model, "pixels_per_patch", None) is not None:
+        # pixel subsampling changes the effective training objective
         print(
             "Warning: pixel subsampling is enabled for this model and changes the training objective. "
             "Use only for exploratory runs, not benchmark claims."
@@ -254,6 +266,7 @@ def main():
             print(f"Error: Pretrained weights not found: {pretrained_path}")
             sys.exit(1)
 
+        # pretrained checkpoints are used for staged rd fine tuning
         print(f"\n[RD Cascade] Ładowanie pre-trenowanych wag z: {pretrained_path}")
         ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
@@ -278,10 +291,12 @@ def main():
     scheduler_cfg = training_cfg.get("scheduler", {})
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # compressai entropy models expose quantile parameters that use a separate aux loss.
     aux_parameters = [p for n, p in model.named_parameters() if n.endswith(".quantiles")]
     aux_optimizer = torch.optim.Adam(aux_parameters, lr=1e-3) if aux_parameters else None
     scheduler = None
     if scheduler_cfg.get("enabled", False):
+        # cosine schedule is optional and controlled entirely from config.
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=scheduler_cfg.get("T_max", epochs),
@@ -289,6 +304,7 @@ def main():
         )
 
     if loss_name == "rate_distortion":
+        # rate-distortion loss adds a bitrate term based on entropy likelihoods.
         rd_lambda = training_cfg.get("rd_lambda", 0.01)
         distortion_metric = training_cfg.get("distortion_metric", "masked_mse")
         loss_fn = build_loss(
@@ -302,6 +318,7 @@ def main():
 
     use_wandb = logging_cfg.get("use_wandb", False) and not args.disable_wandb
     run_cfg = {
+        # log run metadata needed to reproduce the experiment later.
         **cfg,
         "num_input_bands": num_input_bands,
         "git_hash": get_git_short_hash(),

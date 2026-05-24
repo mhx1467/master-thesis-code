@@ -25,4 +25,5 @@ class SpatialContextEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # this path extracts low-resolution spatial context from the hyperspectral patch.
         return self.net(x)

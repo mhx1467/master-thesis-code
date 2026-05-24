@@ -8,6 +8,7 @@ def test_symbol_code_length_loss_prefers_zero_integer_residual():
     loss_fn = SymbolCodeLengthLoss(symbol_scale=10000, code_weight=1.0, mse_weight=0.0)
     target = torch.zeros(1, 2, 1, 1)
 
+    # zero residual should be cheaper than a one-symbol prediction error.
     zero_residual = loss_fn(torch.zeros_like(target), target, None)
     one_symbol_residual = loss_fn(torch.full_like(target, 0.0001), target, None)
 
@@ -23,6 +24,7 @@ def test_symbol_code_length_loss_rounding_keeps_gradient_path():
     loss = loss_fn(prediction, target, None)
     loss.backward()
 
+    # straight-through rounding should still allow gradients to reach predictions.
     assert prediction.grad is not None
     assert torch.isfinite(prediction.grad).all()
     assert prediction.grad.abs().sum().item() > 0.0

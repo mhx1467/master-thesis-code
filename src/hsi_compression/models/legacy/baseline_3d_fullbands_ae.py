@@ -18,12 +18,12 @@ class Baseline3DFullBandsAutoencoder(nn.Module):
         h1, h2, h3 = hidden_channels
 
         self.enc3d = nn.Sequential(
-            # (N,1,C,128,128) -> (N,h1,C,64,64)
+            # first reduce spatial resolution while keeping all spectral bands
             nn.Conv3d(1, h1, kernel_size=3, stride=(1, 2, 2), padding=1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv3d(h1, h1, kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-            # -> (N,h2,C,32,32)
+            # reduce spatial resolution again before spectral compression
             nn.Conv3d(h1, h2, kernel_size=3, stride=(1, 2, 2), padding=1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv3d(h2, h2, kernel_size=3, stride=1, padding=1),
@@ -127,7 +127,7 @@ class Baseline3DFullBandsAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
-        # z is 5D: (N, C, D, H, W). We reshape to 4D for EntropyBottleneck
+        # z is five-dimensional, so channels and spectral depth are folded for entropy coding
         N, C, D, H, W = z.shape
         z_4d = z.view(N, C * D, H, W)
         z_hat_4d, likelihoods = self.entropy_bottleneck(z_4d)

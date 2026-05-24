@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 
 def _to_mask_float(mask: torch.Tensor) -> torch.Tensor:
+    # metric formulas multiply by the mask, so boolean masks are converted to 0.0 or 1.0.
     return mask.float() if mask.dtype != torch.float32 else mask
 
 
@@ -16,6 +17,7 @@ def psnr(
     data_range: float = 1.0,
     eps: float = 1e-12,
 ) -> torch.Tensor:
+    # psnr is derived from mse, with eps preventing division by zero on perfect reconstructions.
     mse_val = torch.mean((x_hat - x) ** 2)
     return 10.0 * torch.log10(torch.tensor(data_range**2, device=x.device) / (mse_val + eps))
 
@@ -48,6 +50,7 @@ def ref_ssim(
     if channels is None:
         channels = int(x.shape[1])
     spatial_min = min(int(x.shape[-2]), int(x.shape[-1]))
+    # ssim needs an odd window size that fits inside the spatial patch
     win_size = min(11, spatial_min if spatial_min % 2 == 1 else spatial_min - 1)
     if win_size < 3:
         return torch.tensor(float("nan"), device=x.device)
@@ -68,6 +71,7 @@ def masked_mse(
     eps: float = 1e-12,
 ) -> torch.Tensor:
     mask_f = _to_mask_float(mask)
+    # only valid values contribute to both numerator and denominator.
     se = (x_hat - x) ** 2 * mask_f
     return se.sum() / mask_f.sum().clamp_min(eps)
 
@@ -88,6 +92,7 @@ def invalid_region_mae(
     mask: torch.Tensor,
     eps: float = 1e-12,
 ) -> torch.Tensor:
+    # this diagnostic checks whether the model produces unwanted signal in masked areas.
     invalid = (~mask.bool()).float()
     return (x_hat.abs() * invalid).sum() / invalid.sum().clamp_min(eps)
 
@@ -106,6 +111,7 @@ def sam(
     x: torch.Tensor,
     eps: float = 1e-8,
 ) -> torch.Tensor:
+    # sam treats each pixel spectrum as a vector and measures the angle between spectra.
     x_hat_p = x_hat.permute(0, 2, 3, 1)
     x_p = x.permute(0, 2, 3, 1)
 
@@ -118,6 +124,7 @@ def sam(
 
 
 def ref_sam(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    # reference sam follows the same channel-first convention used by benchmark reports.
     numerator = torch.sum(x_hat * x, dim=1)
     denominator = torch.sqrt(torch.sum(x_hat**2, dim=1) * torch.sum(x**2, dim=1)).clamp_min(1e-12)
     fraction = (numerator / denominator).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
@@ -135,6 +142,7 @@ def masked_sam(
     x_p = x.permute(0, 2, 3, 1)
     mask_p = mask.permute(0, 2, 3, 1).bool()
 
+    # masked sam ignores invalid bands but keeps a pixel if at least one band is valid
     x_hat_p = x_hat_p * mask_p
     x_p = x_p * mask_p
 
@@ -177,6 +185,7 @@ def compute_true_bpppc(
 ) -> float:
     n, c, h, w = original_shape
     num_values = n * c * h * w
+    # probability likelihoods are converted to bits with negative log base two.
     bits = torch.log(likelihoods.clamp_min(1e-12)).sum() / -math.log(2.0)
     return (bits / num_values).item()
 
@@ -188,9 +197,11 @@ def sid(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor
     x_hat_pos = torch.clamp(x_hat_p, min=eps)
     x_pos = torch.clamp(x_p, min=eps)
 
+    # normalize each spectrum so sid compares spectral distributions, not raw scale.
     p = x_pos / torch.sum(x_pos, dim=-1, keepdim=True)
     q = x_hat_pos / torch.sum(x_hat_pos, dim=-1, keepdim=True)
 
+    # sid is symmetric kl divergence between normalized spectra
     d_pq = torch.sum(p * torch.log(p / q), dim=-1)
     d_qp = torch.sum(q * torch.log(q / p), dim=-1)
     sid_val = d_pq + d_qp
@@ -233,9 +244,11 @@ def _sum_string_bytes(obj) -> int:
     - tuples with the same nesting
     """
     if isinstance(obj, (bytes, bytearray)):
+        # a raw byte string is the simplest bitstream container.
         return len(obj)
 
     if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+        # compressai can return nested lists when multiple streams are produced.
         total = 0
         for item in obj:
             total += _sum_string_bytes(item)
@@ -262,6 +275,7 @@ def compute_actual_bpppc_from_strings(
     if len(original_shape) != 4:
         raise ValueError(f"Expected original_shape to be (N, C, H, W), got {original_shape}")
 
+    # divide by all original spectral values to report bits per pixel per channel
     n, c, h, w = original_shape
     num_values = n * c * h * w
     if num_values <= 0:
@@ -274,6 +288,7 @@ def compute_compression_ratio_from_bpppc(
     bpppc: float | None,
     original_bits_per_channel: float = 16.0,
 ) -> float | None:
+    # compression ratio compares the original fixed-width sample cost to coded cost.
     if bpppc is None:
         return None
     if bpppc <= 0.0:

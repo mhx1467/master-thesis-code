@@ -56,6 +56,7 @@ def parse_args():
 
 
 def _call_model_forward(model, x, mask):
+    # models are allowed to ignore masks for backwards compatibility
     try:
         return model(x, valid_mask=mask)
     except TypeError:
@@ -63,6 +64,7 @@ def _call_model_forward(model, x, mask):
 
 
 def _call_model_compress(model, x, mask):
+    # newer models accept masks during compression, older baselines do not.
     try:
         return model.compress(x, valid_mask=mask)
     except TypeError:
@@ -71,6 +73,7 @@ def _call_model_compress(model, x, mask):
 
 def _call_model_decompress(model, packed, mask):
     if "latent" in packed:
+        # some experimental codecs return a latent tensor instead of entropy-coded strings.
         return model.decompress(latent=packed["latent"], z_shape=packed.get("z_shape"))
 
     kwargs = {
@@ -85,6 +88,7 @@ def _call_model_decompress(model, packed, mask):
 
 
 def _validate_packed_output(packed: dict):
+    # actual bitrate is only meaningful if compress returns a real payload
     if not isinstance(packed, dict):
         raise RuntimeError("model.compress() must return a dict")
     if "latent" in packed:
@@ -98,6 +102,7 @@ def _validate_packed_output(packed: dict):
 
 
 def _safe_filename_stem(value: str) -> str:
+    # make user-provided run names safe for json file names.
     allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
     stem = "".join(ch if ch in allowed else "_" for ch in value).strip("._-")
     return stem or "eval"
@@ -116,6 +121,7 @@ def evaluate_model(
 
     def _get_proxy_bpppc(model_obj) -> float | None:
         model_raw = model_obj.module if hasattr(model_obj, "module") else model_obj
+        # proxy bitrate is kept separate from measured bitstream bitrate
         proxy = getattr(model_raw, "proxy_bpppc", None)
         if proxy is not None:
             return float(proxy)
@@ -164,12 +170,14 @@ def evaluate_model(
     encode_times_ms = []
     decode_times_ms = []
     if device.type == "cuda":
+        # cuda events measure model forward latency more accurately than wall clock.
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
 
     progress = tqdm(loader, desc=f"Evaluate [{split_name}]") if show_progress else loader
 
     for batch in progress:
+        # evaluation uses masks when available, but still supports tensor-only datasets.
         x = (
             batch["x"].to(device, non_blocking=True)
             if isinstance(batch, dict)
@@ -201,6 +209,7 @@ def evaluate_model(
         likelihoods = outputs.get("likelihoods")
 
         totals["loss"] += (
+            # loss here is a simple reconstruction mse diagnostic, not necessarily training loss.
             masked_mse(x_hat, x, mask).item()
             if mask is not None
             else torch.mean((x_hat - x) ** 2).item()
@@ -235,6 +244,7 @@ def evaluate_model(
         ).item()
         if likelihoods is not None:
             has_likelihoods = True
+            # likelihood bitrate is estimated from entropy-model probabilities.
             totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
         model_proxy_bpppc = _get_proxy_bpppc(model)
         if model_proxy_bpppc is not None:
@@ -252,6 +262,7 @@ def evaluate_model(
             )
         )
         if supports_actual:
+            # this path measures metrics after real compress and decompress
             if device.type == "cuda":
                 torch.cuda.synchronize()
             encode_start = time.perf_counter()
@@ -275,6 +286,7 @@ def evaluate_model(
             x_hat_actual = decoded["x_hat"].float()
             actual_available = True
 
+            # actual metrics use the decoded reconstruction, not the differentiable forward pass.
             totals["actual_masked_mse"] += (
                 masked_mse(x_hat_actual, x, mask)
                 if mask is not None
@@ -311,12 +323,14 @@ def evaluate_model(
             with torch.no_grad():
                 B, C, H, W = x.shape
 
+                # torchmetrics ssim expects image channels, so each spectral band is one image.
                 x_ssim = x.view(B * C, 1, H, W)
                 x_hat_ssim = x_hat_actual.view(B * C, 1, H, W)
 
                 _, ssim_map = tm_ssim(x_hat_ssim, x_ssim, data_range=1.0, return_full_image=True)
 
                 if mask is not None:
+                    # masked ssim is averaged only over valid spatial locations.
                     mask_expanded = mask.expand(-1, C, -1, -1) if mask.shape[1] == 1 else mask
 
                     mask_ssim = mask_expanded.reshape(B * C, 1, H, W).bool()
@@ -341,6 +355,7 @@ def evaluate_model(
                 else torch.tensor(0.0, device=device)
             ).item()
             if "strings" in packed:
+                # actual bpppc counts real bytes produced by model.compress.
                 totals["actual_bpppc"] += compute_actual_bpppc_from_strings(
                     packed["strings"], x.shape
                 )
@@ -361,6 +376,7 @@ def evaluate_model(
             )
 
     n = max(num_batches, 1)
+    # average all accumulated metrics over evaluated batches.
     out = {k: v / n for k, v in totals.items()}
     out["actual_ssim"] = totals["actual_ssim"] / n
     out["latent_shape"] = latent_shape
@@ -399,6 +415,7 @@ def evaluate_model(
     out["actual_max_abs_error"] = actual_max_abs_error if actual_available else None
 
     if len(inference_times) > 5:
+        # skip the first few cuda timings because warmup batches are often slower.
         out["inference_ms_per_batch"] = sum(inference_times[5:]) / len(inference_times[5:])
     elif len(inference_times) > 0:
         out["inference_ms_per_batch"] = sum(inference_times) / len(inference_times)
@@ -435,6 +452,7 @@ def main():
     print(f"Device: {device}")
 
     ckpt_raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    # checkpoint config decides which model and data protocol are reconstructed.
     ckpt_config = ckpt_raw.get("config", {})
     model_section = ckpt_config.get("model", {})
     data_section = ckpt_config.get("data", {})
@@ -457,6 +475,7 @@ def main():
         prefer_npy=True,
     )
     if args.subset_size:
+        # subsets are useful for quick smoke checks without changing the split protocol.
         ds = Subset(ds, list(range(min(args.subset_size, len(ds)))))
 
     loader = build_dataloader(
@@ -484,6 +503,7 @@ def main():
     load_checkpoint(path=checkpoint_path, model=model, optimizer=None, map_location=device)
 
     if hasattr(model, "update"):
+        # compressai models need update before real entropy coding.
         model.update(force=True)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -594,6 +614,7 @@ def main():
     print(f"{'=' * 55}\n")
 
     result = {
+        # json output stores enough metadata to identify the exact evaluation context.
         "checkpoint_path": str(checkpoint_path),
         "split": args.split,
         "difficulty": difficulty,

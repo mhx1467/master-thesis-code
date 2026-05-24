@@ -45,15 +45,20 @@ class BidirectionalMambaBlock(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # residual keeps the original token features available if mamba changes are not useful.
         residual = x
         x_norm = self.norm(x)
 
+        # forward pass reads the spectral sequence from first band group to last band group.
         y_fwd = self.forward_mamba(x_norm)
 
+        # backward pass reads the same sequence in reverse, then flips it back.
+        # this is useful because compression can use the whole spectrum, not only past bands.
         x_rev = torch.flip(x_norm, dims=[1])
         y_bwd = self.backward_mamba(x_rev)
         y_bwd = torch.flip(y_bwd, dims=[1])
 
+        # concatenate both directions and project back to the original feature size.
         y = torch.cat([y_fwd, y_bwd], dim=-1)
         y = self.merge(y)
         y = self.dropout(y)

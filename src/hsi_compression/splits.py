@@ -5,6 +5,7 @@ from pathlib import Path
 def _validate_reference_split_entry(rel_path: str) -> None:
     rel = Path(rel_path)
 
+    # split entries must match the published hyspecnet relative path convention
     if rel.is_absolute():
         raise ValueError(f"Split entry must be a relative path, got absolute path: {rel_path}")
     if rel.parts and rel.parts[0] == "patches":
@@ -42,6 +43,7 @@ def load_split_csv(csv_path: str | Path) -> list[str]:
             if not row:
                 continue
             if len(row) != 1:
+                # reference split files are intentionally simple one-column csv files.
                 raise ValueError(f"Expected 1-column CSV row, got {row!r} for {csv_path}")
             entries.append(row[0].strip())
 
@@ -53,6 +55,7 @@ def load_split_csv(csv_path: str | Path) -> list[str]:
 
 def csv_entry_to_patch_path(dataset_root: str | Path, rel_path: str) -> Path:
     dataset_root = Path(dataset_root)
+    # validate before joining paths so malformed csv entries fail loudly.
     _validate_reference_split_entry(rel_path)
     rel = Path(rel_path)
     return dataset_root / "patches" / rel
@@ -68,10 +71,12 @@ def resolve_split_paths(
     csv_path: str | Path,
 ) -> list[Path]:
     rel_paths = load_split_csv(csv_path)
+    # csv entries are relative to patches, not to the dataset root itself
     paths = [csv_entry_to_patch_path(dataset_root, p) for p in rel_paths]
 
     missing = [p for p in paths if not p.exists()]
     if missing:
+        # missing files usually mean dataset root or preprocessing artifacts are wrong.
         raise FileNotFoundError(
             f"{len(missing)} resolved patch files do not exist. First missing: {missing[0]}"
         )

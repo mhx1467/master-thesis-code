@@ -68,14 +68,17 @@ class Baseline2DAutoencoder(nn.Module):
         self.entropy_bottleneck = EntropyBottleneck(latent_channels)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
+        # encoder treats spectral bands as channels and only downsamples spatial dimensions.
         x = self.enc_block1(x)
         x = self.down1(x)
         x = self.enc_block2(x)
         x = self.down2(x)
+        # z is the compact 32x32 latent representation that will be entropy coded.
         z = self.bottleneck(x)
         return z
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
+        # decoder upsamples the latent grid back to the original patch resolution.
         x = self.up1(z)
         x = self.dec_block1(x)
         x = self.up2(x)
@@ -85,6 +88,7 @@ class Baseline2DAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
+        # during training, entropy bottleneck simulates quantization and returns likelihoods.
         z_hat, likelihoods = self.entropy_bottleneck(z)
         x_hat = self.decode(z_hat)
         return {
@@ -99,6 +103,7 @@ class Baseline2DAutoencoder(nn.Module):
 
     def compress(self, x: torch.Tensor, **kwargs) -> dict:  # noqa: ARG002  # noqa: ARG002
         z = self.encode(x)
+        # compress returns byte strings plus shape metadata needed by decompress.
         strings = self.entropy_bottleneck.compress(z)
         return {
             "strings": strings,
@@ -114,6 +119,7 @@ class Baseline2DAutoencoder(nn.Module):
 
     @property
     def proxy_bpppc(self) -> float:
+        # proxy bitrate counts latent scalar slots per original spectral pixel.
         latent_h = 32
         latent_w = 32
         input_h = 128

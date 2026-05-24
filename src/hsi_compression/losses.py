@@ -14,6 +14,7 @@ class MSELoss(nn.Module):
         x: torch.Tensor,
         _: torch.Tensor | None,
     ) -> torch.Tensor:
+        # plain mse ignores valid masks and is mostly used for simple baselines.
         return F.mse_loss(x_hat, x)
 
 
@@ -28,6 +29,7 @@ class RMSELoss(nn.Module):
         x: torch.Tensor,
         _: torch.Tensor | None,
     ) -> torch.Tensor:
+        # rmse keeps the same units as the normalized image values.
         return torch.sqrt(F.mse_loss(x_hat, x) + self.eps)
 
 
@@ -39,6 +41,7 @@ class MaskedMSELoss(nn.Module):
         mask: torch.Tensor | None,
     ) -> torch.Tensor:
         if mask is None:
+            # fall back to standard mse when the dataset has no mask.
             return F.mse_loss(x_hat, x)
         return masked_mse(x_hat, x, mask)
 
@@ -86,6 +89,7 @@ class SymbolCodeLengthLoss(nn.Module):
         x_hat_fp32 = x_hat.float()
         x_fp32 = x.float()
 
+        # the straight through round keeps symbol training differentiable
         pred_symbols = self._round_ste(
             x_hat_fp32.clamp(self.value_min, self.value_max) * self.symbol_scale
         )
@@ -94,6 +98,7 @@ class SymbolCodeLengthLoss(nn.Module):
         ).detach()
 
         residual = target_symbols - pred_symbols
+        # log residual magnitude is a simple proxy for how expensive residuals are to code
         code_proxy = torch.log1p(residual.abs()) / math.log(2.0)
         code_loss = self._masked_mean(code_proxy, mask)
 
@@ -108,6 +113,7 @@ class SymbolCodeLengthLoss(nn.Module):
 
     @staticmethod
     def _round_ste(x: torch.Tensor) -> torch.Tensor:
+        # forward uses rounded values, backward sees identity for usable gradients.
         return x + (torch.round(x) - x).detach()
 
     @staticmethod
@@ -116,6 +122,7 @@ class SymbolCodeLengthLoss(nn.Module):
             return values.mean()
         valid = mask.to(device=values.device, dtype=torch.bool)
         if not valid.any():
+            # empty masks should not create nan losses during unusual batches.
             return torch.zeros((), device=values.device, dtype=values.dtype)
         return values[valid].mean()
 
@@ -133,6 +140,7 @@ class MaskedHybridLoss(nn.Module):
     ) -> torch.Tensor:
         if mask is None:
             mse_val = F.mse_loss(x_hat, x)
+            # cosine loss penalizes spectral shape errors even when mse is small.
             x_hat_p = x_hat.permute(0, 2, 3, 1)
             x_p = x.permute(0, 2, 3, 1)
             cos = F.cosine_similarity(
@@ -149,6 +157,7 @@ class MaskedHybridLoss(nn.Module):
         x_hat_p = x_hat.permute(0, 2, 3, 1)
         x_p = x.permute(0, 2, 3, 1)
         mask_p = mask.permute(0, 2, 3, 1)
+        # spectral angle is meaningful only where the full spectrum is valid.
         pixel_mask = mask_p.all(dim=-1)
 
         if pixel_mask.any():
@@ -179,6 +188,7 @@ class RateDistortionLoss(nn.Module):
         N, C, H, W = x.shape
         num_pixels = N * C * H * W
 
+        # likelihoods are probabilities, so negative log two gives estimated bits
         bits = torch.log(likelihoods.clamp_min(1e-12)).sum() / -math.log(2.0)
         R = bits / num_pixels
 
@@ -199,6 +209,7 @@ LOSS_REGISTRY = {
 
 def build_loss(loss_name: str, **kwargs) -> nn.Module:
     if loss_name == "rate_distortion":
+        # rate-distortion needs constructor arguments such as lambda and distortion metric.
         return RateDistortionLoss(**kwargs)
     if loss_name == "symbol_code_length":
         return SymbolCodeLengthLoss(**kwargs)

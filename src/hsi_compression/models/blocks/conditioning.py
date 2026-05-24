@@ -18,8 +18,10 @@ class SpatialConditioning(nn.Module):
             self.bias = None
 
     def forward(self, f_spec: torch.Tensor, f_spat: torch.Tensor) -> torch.Tensor:
+        # spatial features produce a gate that strengthens or weakens spectral features.
         gate = torch.sigmoid(self.gate(f_spat))
         out = f_spec * (1.0 + gate)
         if self.bias is not None:
+            # optional bias lets spatial context also shift the feature values.
             out = out + self.bias(f_spat)
         return out

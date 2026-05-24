@@ -19,8 +19,10 @@ class PixelwiseSpectralAttentionPooling(nn.Module):
         self.score = nn.Linear(d_model, 1, bias=False)
 
     def forward(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # attention assigns one importance score to each spectral token.
         scores = self.score(h).squeeze(-1)
         alpha = torch.softmax(scores, dim=-1)
+        # the pooled vector is a weighted average of all spectral tokens.
         pooled = torch.einsum("nt,ntd->nd", alpha, h)
         return pooled, alpha
 
@@ -35,7 +37,7 @@ class PixelwiseSpectralRefinementBlock(nn.Module):
         self.conv2 = nn.Conv1d(hidden_channels, 1, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (N, C)
+        # x contains one reconstructed spectrum per pixel.
         seq = x.unsqueeze(1)
         delta = self.conv2(self.act(self.conv1(seq))).squeeze(1)
         return x + delta
@@ -80,8 +82,12 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         self.num_tokens = self.c_pad // group_size
         self.pad_bands = self.c_pad - in_channels
 
+        # one token contains group_size adjacent spectral bands.
+        # the linear layer turns each raw group into a learned d_model vector.
         self.token_embed = nn.Linear(group_size, d_model)
         self.pos_embed = nn.Parameter(torch.zeros(1, self.num_tokens, d_model))
+        # every block first mixes information along the spectral sequence with mamba,
+        # then applies a small residual feed-forward network to each token.
         self.blocks = nn.ModuleList(
             [
                 nn.Sequential(
@@ -111,6 +117,8 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
             nn.GELU(),
             nn.Linear(mlp_hidden_dim, latent_channels),
         )
+        # this entropy model is applied to the per-pixel latent vectors after they are
+        # arranged as a small 4d tensor expected by compressai.
         self.entropy_bottleneck = EntropyBottleneck(latent_channels)
         self.decoder_head = nn.Sequential(
             nn.LayerNorm(latent_channels),
@@ -133,17 +141,21 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
     def _pad_input(self, x_pix: torch.Tensor) -> torch.Tensor:
         if self.pad_bands <= 0:
             return x_pix
+        # padding is only structural, so it adds zeros beyond the real spectral bands.
         return F.pad(x_pix, (0, self.pad_bands), mode="constant", value=0.0)
 
     def _tokenize(self, x_pix: torch.Tensor) -> torch.Tensor:
         x_pad = self._pad_input(x_pix)
+        # convert one long spectrum into a sequence of short spectral groups.
         tokens = rearrange(x_pad, "n (t g) -> n t g", g=self.group_size)
         h = self.token_embed(tokens) + self.pos_embed
         return h
 
     def _run_backbone(self, h: torch.Tensor) -> torch.Tensor:
         for block in self.blocks:
+            # block[0] is the bidirectional mamba layer that reads the token sequence.
             h = block[0](h)
+            # the remaining layers form a residual mlp for token-wise refinement.
             ff_in = block[1](h)
             ff_out = block[5](block[4](block[3](block[2](ff_in))))
             h = h + ff_out
@@ -152,10 +164,12 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
     def _aggregate(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.pooling == "attention":
             return self.attn_pool(h)
+        # mean pooling is the simple baseline where all spectral tokens are equally important.
         pooled = h.mean(dim=1)
         return pooled, None
 
     def encode_pixels(self, x_pix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # this path receives spectra as rows, one row per sampled pixel.
         h = self._tokenize(x_pix)
         h = self._run_backbone(h)
         pooled, alpha = self._aggregate(h)
@@ -163,6 +177,7 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         return z, alpha
 
     def decode_pixels(self, z_hat: torch.Tensor) -> torch.Tensor:
+        # decode one latent vector back into the full spectral curve for each pixel.
         x_hat = self.decoder_head(z_hat)
         x_hat = self.spectral_refinement(x_hat)
         x_hat = self.output_activation(x_hat)
@@ -175,6 +190,7 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         if self.pixels_per_patch is None or self.pixels_per_patch >= num_pixels:
             return torch.arange(num_pixels, device=device)
         if valid_mask is None:
+            # without a mask, random pixels are sampled uniformly from the patch.
             perm = torch.randperm(num_pixels, device=device)
             return perm[: self.pixels_per_patch]
         valid = valid_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
@@ -182,8 +198,10 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
             perm = torch.randperm(num_pixels, device=device)
             return perm[: self.pixels_per_patch]
         if valid.numel() >= self.pixels_per_patch:
+            # when enough valid pixels exist, train only on valid spectra.
             perm = torch.randperm(valid.numel(), device=device)
             return valid[perm[: self.pixels_per_patch]]
+        # if there are too few valid pixels, repeat valid indices to keep tensor sizes fixed.
         extra = torch.randint(
             0, valid.numel(), (self.pixels_per_patch - valid.numel(),), device=device
         )
@@ -193,6 +211,7 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         self, x: torch.Tensor, valid_mask: torch.Tensor | None = None
     ) -> dict[str, torch.Tensor]:
         b, c, h, w = x.shape
+        # flatten the spatial grid so individual pixel spectra can be sampled cheaply.
         x_bhwc = rearrange(x, "b c h w -> b (h w) c")
         mask_flat = None
         if valid_mask is not None:
@@ -221,6 +240,7 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
 
         x_sampled = torch.stack(x_samples, dim=0)
         z_sampled = torch.stack(z_samples, dim=0)
+        # compressai entropy bottleneck expects channel-first 4d tensors.
         z_4d = rearrange(z_sampled, "b k l -> b l k 1")
         z_hat_4d, likelihoods = self.entropy_bottleneck(z_4d)
         z_hat_sampled = rearrange(z_hat_4d, "b l k 1 -> b k l")
@@ -233,6 +253,7 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
 
         x_sampled_4d = rearrange(x_sampled, "b k c -> b c k 1")
         xhat_sampled_4d = rearrange(xhat_sampled, "b k c -> b c k 1")
+        # sampled training tensors contain only selected valid pixel spectra.
         mask_for_loss = torch.ones_like(xhat_sampled_4d, dtype=torch.bool)
 
         return {
@@ -248,6 +269,7 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         }
 
     def _forward_eval_chunked(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        # evaluation reconstructs the whole patch, but encoding is chunked inside encode.
         z = self.encode(x)
         z_hat, likelihoods = self.entropy_bottleneck(z)
         x_hat = self.decode(z_hat)
@@ -263,6 +285,7 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
             x_pix = x_bhwc[bi]
             z_chunks = []
             for start in range(0, num_pixels, chunk):
+                # chunks reduce peak memory while producing the same per-pixel latents.
                 x_chunk = x_pix[start : start + chunk]
                 z_chunk, _ = self.encode_pixels(x_chunk)
                 z_chunks.append(z_chunk)
@@ -279,10 +302,10 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
 
     def _collapse_valid_mask(self, valid_mask: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """
-        Convert mask to shape (B, 1, H, W)
+        convert mask to shape (b, 1, h, w)
         Supports:
-        - (B, 1, H, W)
-        - (B, C, H, W)
+        - (b, 1, h, w)
+        - (b, c, h, w)
         """
         if valid_mask is None:
             return torch.ones(
@@ -297,11 +320,11 @@ class PixelwiseSpectralMambaAutoencoder(nn.Module):
         if valid_mask.dim() != 4:
             raise ValueError(f"valid_mask must be 4D, got shape={valid_mask.shape}")
 
-        # already pixel mask
+        # already a pixel mask
         if valid_mask.shape[1] == 1:
             return valid_mask > 0
 
-        # per-band mask → collapse to pixel mask
+        # per-band mask is collapsed to a pixel mask by requiring all bands to be valid
         if valid_mask.shape[1] == x.shape[1]:
             return (valid_mask > 0).all(dim=1, keepdim=True)
 

@@ -55,18 +55,22 @@ class Baseline1DPixelAutoencoder(nn.Module):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         n, c, h, w = x.shape
+        # each pixel spectrum is processed independently as a one-dimensional signal.
         x_seq = x.permute(0, 2, 3, 1).reshape(n * h * w, 1, c)
         z_seq = self.encoder(x_seq)
         _, lc, ll = z_seq.shape
+        # fold the spectral latent back into channel dimension for entropy coding.
         return z_seq.reshape(n, h, w, lc * ll).permute(0, 3, 1, 2).contiguous()
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         n, ch, h, w = z.shape
         ll = ch // self.latent_channels
+        # unfold the latent channels back to a per-pixel spectral sequence.
         z_seq = z.permute(0, 2, 3, 1).reshape(n * h * w, self.latent_channels, ll)
         x_seq = self.decoder(z_seq)
 
         curr_len = x_seq.shape[-1]
+        # pooling and upsampling can make the reconstructed length slightly different.
         if curr_len < self.in_channels:
             x_seq = F.pad(x_seq, (0, self.in_channels - curr_len))
         elif curr_len > self.in_channels:
@@ -78,6 +82,7 @@ class Baseline1DPixelAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
+        # entropy bottleneck gives the quantized latent and its coding likelihoods.
         z_hat, likelihoods = self.entropy_bottleneck(z)
         x_hat = self.decode(z_hat)
         return {"x_hat": x_hat, "z": z, "z_hat": z_hat, "likelihoods": likelihoods}

@@ -54,9 +54,7 @@ def test_psnr_uses_epsilon_for_exact_reconstructions():
 def test_masked_error_metrics_use_only_true_mask_entries():
     x = torch.zeros(1, 2, 2, 2)
     x_hat = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]])
-    mask = torch.tensor(
-        [[[[True, False], [True, False]], [[False, True], [False, True]]]]
-    )
+    mask = torch.tensor([[[[True, False], [True, False]], [[False, True], [False, True]]]])
 
     selected = [1.0, 3.0, 6.0, 8.0]
     expected_mse = sum(value**2 for value in selected) / len(selected)
@@ -67,9 +65,7 @@ def test_masked_error_metrics_use_only_true_mask_entries():
     assert masked_mse(x_hat, x, mask).item() == pytest.approx(expected_mse)
     assert masked_mae(x_hat, x, mask).item() == pytest.approx(expected_mae)
     assert masked_rmse(x_hat, x, mask).item() == pytest.approx(expected_rmse)
-    assert masked_psnr(x_hat, x, mask, data_range=10.0).item() == pytest.approx(
-        expected_psnr
-    )
+    assert masked_psnr(x_hat, x, mask, data_range=10.0).item() == pytest.approx(expected_psnr)
 
 
 def test_masked_error_metrics_support_float_weight_masks():

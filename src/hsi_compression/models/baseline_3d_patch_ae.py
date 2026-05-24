@@ -23,6 +23,7 @@ class Baseline3DPatchAutoencoder(nn.Module):
         self._latent_spectral_len = math.ceil(math.ceil(in_channels / 2) / 2)
 
         h1, h2 = hidden_channels
+        # 3d convolutions downsample spectral and spatial axes together.
         self.encoder = nn.Sequential(
             nn.Conv3d(1, h1, kernel_size=3, stride=(2, 2, 2), padding=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -30,6 +31,7 @@ class Baseline3DPatchAutoencoder(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv3d(h2, latent_channels, kernel_size=3, padding=1),
         )
+        # transposed 3d convolutions undo the downsampling from the encoder.
         self.decoder = nn.Sequential(
             nn.ConvTranspose3d(
                 latent_channels,
@@ -61,10 +63,12 @@ class Baseline3DPatchAutoencoder(nn.Module):
             raise ValueError("output_activation must be one of: 'sigmoid', 'identity', None")
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
+        # conv3d expects an explicit input-channel dimension before spectral depth.
         return self.encoder(x.unsqueeze(1))
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         x3d = self.decoder(z)
+        # transpose convolutions can overshoot by one band, so trim or pad to exact band count.
         if x3d.shape[2] > self.in_channels:
             x3d = x3d[:, :, : self.in_channels]
         elif x3d.shape[2] < self.in_channels:
@@ -74,11 +78,13 @@ class Baseline3DPatchAutoencoder(nn.Module):
 
     def _to_4d(self, z: torch.Tensor) -> torch.Tensor:
         n, c, d, h, w = z.shape
+        # compressai entropy bottleneck expects a four-dimensional channel-first tensor.
         return z.view(n, c * d, h, w)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
         z_4d = self._to_4d(z)
+        # likelihoods describe how expensive the latent values are to code.
         z_hat_4d, likelihoods = self.entropy_bottleneck(z_4d)
         z_hat = z_hat_4d.view_as(z)
         x_hat = self.decode(z_hat)

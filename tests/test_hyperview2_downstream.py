@@ -30,6 +30,7 @@ def _write_labels(path, rows):
 def test_build_hyperview2_samples_pairs_labels_with_prisma_arrays(tmp_path):
     root = tmp_path / "hyperview2"
     (root / "train" / "prisma").mkdir(parents=True)
+    # synthetic files cover both channel-first and channel-last prisma arrays.
     _write_labels(
         root / "train.csv",
         [
@@ -48,6 +49,7 @@ def test_build_hyperview2_samples_pairs_labels_with_prisma_arrays(tmp_path):
 
 def test_build_hyperview2_samples_pairs_official_numeric_layout(tmp_path):
     root = tmp_path / "hyperview2"
+    # official layout uses numeric ids and split-specific folders.
     (root / "HYPERVIEW2" / "train" / "hsi_satellite").mkdir(parents=True)
     (root / "HYPERVIEW2" / "test" / "hsi_satellite").mkdir(parents=True)
     with (root / "HYPERVIEW2" / "train_gt.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -128,6 +130,7 @@ def test_hyperview2_compression_dataset_and_collate_pad_spatial(tmp_path):
 
     samples = build_hyperview2_samples(root, modality="prisma")
     dataset = Hyperview2CompressionDataset(samples, modality="prisma", normalization="none")
+    # collate pads variable spatial sizes to a shared model input tensor.
     batch = collate_compression_batch([dataset[0], dataset[1]], pad_multiple=4)
 
     assert batch["x"].shape == (2, 230, 4, 4)
@@ -139,6 +142,7 @@ def test_hyperview2_compression_dataset_and_collate_pad_spatial(tmp_path):
 
 
 def test_collate_pixel_set_batch_pads_variable_pixel_counts():
+    # pixel-set batches can contain different numbers of valid pixels per sample.
     batch = [
         {
             "pixels": np.ones((2, 230), dtype=np.float32),
@@ -188,6 +192,7 @@ def test_spectral_set_regressor_encode_set_matches_head_input():
     pixels = torch.randn(4, 5, 230)
     valid_mask = torch.ones(4, 5, dtype=torch.bool)
 
+    # encode_set output must be exactly what the regression head consumes.
     pooled = model.encode_set(pixels, valid_mask)
 
     assert pooled.shape == (4, 33)
@@ -233,6 +238,7 @@ def test_standardizer_roundtrip():
     values = np.asarray([[1, 2], [3, 6]], dtype=np.float32)
     standardizer = Standardizer.fit(values)
 
+    # standardizing and then reversing should recover the original values.
     recovered = standardizer.inverse_transform(standardizer.transform(values))
 
     np.testing.assert_allclose(recovered, values)

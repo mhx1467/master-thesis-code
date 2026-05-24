@@ -19,14 +19,15 @@ class SpectralTokenAttentionPooling(nn.Module):
     def forward(
         self, h: torch.Tensor, mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # h: (N, T, D)
-        scores = self.score(h).squeeze(-1)  # (N, T)
+        # h contains one spectral token sequence per pixel.
+        scores = self.score(h).squeeze(-1)  # shape: batch_pixels, tokens
 
         if mask is not None:
-            # negative weighting of background pixels ensures that after softmax attention = 0.0
+            # negative weighting makes invalid tokens receive almost no attention.
             scores = scores.masked_fill(mask == 0, -1e9)
 
         alpha = torch.softmax(scores, dim=-1)
+        # weighted sum collapses the whole spectrum to one vector per pixel.
         pooled = torch.einsum("nt,ntd->nd", alpha, h)
         return pooled, alpha
 
@@ -41,6 +42,7 @@ class ResidualMLPBlock(nn.Module):
         self.fc2 = nn.Linear(mlp_hidden_dim, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # this residual mlp refines each spectral token after mamba mixes the sequence.
         y = self.fc2(self.drop(self.act(self.fc1(self.norm(x)))))
         return x + y
 
@@ -59,7 +61,8 @@ class ResidualSpectralRefinementBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (N, C)
+        # x contains one reconstructed spectrum per pixel.
+        # conv1d learns small local corrections along the spectral axis.
         return x + self.net(x.unsqueeze(1)).squeeze(1)
 
 
@@ -72,6 +75,7 @@ class SpectralRefinementStack(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for block in self.blocks:
+            # repeated residual blocks gradually polish the reconstructed spectra.
             x = block(x)
         return x
 
@@ -111,14 +115,17 @@ class SpatialConditionPath(nn.Module):
     def forward(
         self, x: torch.Tensor, mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # make sure mask is float and has same spatial dimensions as x
+        # collapse per-band masks to a pixel mask before spatial convolutions.
         if mask is not None and mask.shape[1] > 1:
             mask = mask.amax(dim=1, keepdim=True)
 
+        # first layer mixes all spectral bands at each pixel.
         x = self.act(self.conv1(x))
         if mask is not None:
+            # zero invalid pixels so background does not influence context.
             x = x * mask
 
+        # strided convolutions reduce the spatial grid toward the latent resolution.
         x = self.conv2(x)
         if mask is not None:
             mask = F.max_pool2d(mask, kernel_size=2, stride=2)
@@ -139,6 +146,7 @@ class SpatialConditionPath(nn.Module):
 
         gamma = self.gamma(x)
         beta = self.beta(x) if self.beta is not None else None
+        # gamma and beta will modulate the spectral branch before entropy coding.
         return gamma, beta
 
 
@@ -190,8 +198,10 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         self.pad_bands = self.c_pad - in_channels
         self.num_tokens = self.c_pad // group_size
 
+        # adjacent bands are grouped into tokens, then projected to model dimension.
         self.token_embed = nn.Linear(group_size, spectral_d_model)
         self.pos_embed = nn.Parameter(torch.zeros(1, self.num_tokens, spectral_d_model))
+        # the spectral branch is pixelwise: every spatial position has its own sequence.
         self.spectral_blocks = nn.ModuleList(
             [
                 nn.ModuleDict(
@@ -226,6 +236,7 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
             spectral_out_channels, spectral_out_channels, kernel_size=2, stride=2
         )
 
+        # spatial conditioning supplies image-context information that pure spectral tokens miss.
         self.spatial_condition = SpatialConditionPath(
             in_channels=in_channels,
             embed_channels=spatial_embed_channels,
@@ -235,8 +246,10 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         )
 
         self.encoder_to_latent = nn.Conv2d(spectral_out_channels, latent_channels, kernel_size=1)
+        # entropy bottleneck learns the probability model used for quantization and bitrate.
         self.entropy_bottleneck = EntropyBottleneck(latent_channels)
 
+        # decoder expands the quantized latent grid back to the full hyperspectral cube.
         self.decoder = nn.Sequential(
             nn.Conv2d(latent_channels, spectral_out_channels, kernel_size=1),
             nn.GELU(),
@@ -275,15 +288,19 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         self, x: torch.Tensor, mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         b, c, h, w = x.shape
+        # each pixel spectrum becomes one row so mamba sees a spectral sequence, not an image.
         x_pix = rearrange(x, "b c h w -> (b h w) c")
 
         if self.pad_bands > 0:
+            # padding only makes the band count divisible by group_size.
             x_pix = F.pad(x_pix, (0, self.pad_bands), mode="constant", value=0.0)
 
         tokens = rearrange(x_pix, "n (t g) -> n t g", g=self.group_size)
+        # position embeddings tell the model where each token belongs in the spectrum.
         h_tok = self.token_embed(tokens) + self.pos_embed
 
         for block in self.spectral_blocks:
+            # mamba mixes information along the spectral axis, then mlp refines each token.
             h_tok = block["mamba"](h_tok)
             h_tok = block["mlp"](h_tok)
 
@@ -305,16 +322,19 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
             if mask_pix is not None:
                 h_tok = h_tok * mask_pix.unsqueeze(-1)
                 valid_counts = mask_pix.sum(dim=1, keepdim=True).clamp_min(1.0)
+                # mean pooling divides only by valid spectral tokens.
                 pooled = h_tok.sum(dim=1) / valid_counts
             else:
                 pooled = h_tok.mean(dim=1)
 
         feat = self.spectral_proj(pooled)
+        # return from pixel rows to a spatial feature map.
         feat = rearrange(feat, "(b h w) c -> b c h w", b=b, h=h, w=w)
         return feat, alpha
 
     def _refine_output(self, x_hat: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x_hat.shape
+        # refinement is easier after flattening every pixel to one spectrum.
         x_pix = rearrange(x_hat, "b c h w -> (b h w) c")
         x_pix = self.spectral_refinement(x_pix)
         return rearrange(x_pix, "(b h w) c -> b c h w", b=b, h=h, w=w)
@@ -323,6 +343,7 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         mask_float = valid_mask.float() if valid_mask is not None else None
         gamma, beta = self.spatial_condition(x, mask=mask_float)
 
+        # downsample input before spectral mamba to reduce the number of pixel sequences.
         x_low = F.avg_pool2d(x, kernel_size=2, stride=2)
         mask_low = None
         if mask_float is not None:
@@ -330,8 +351,10 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
 
         spec_feat, _ = self._spectral_encode_grid(x_low, mask=mask_low)
 
+        # spectral feature map is downsampled once more to match the 32x32 latent grid.
         spec_feat = self.downsample_spec(spec_feat)
 
+        # affine fusion injects spatial context into the spectral representation.
         fused = spec_feat * (1.0 + gamma)
         if beta is not None:
             fused = fused + beta
@@ -339,6 +362,7 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
         return z
 
     def decode(self, z_hat: torch.Tensor) -> torch.Tensor:
+        # decode accepts quantized latent tensors from training or real decompression.
         x_hat = self.decoder(z_hat)
         x_hat = self._refine_output(x_hat)
         x_hat = self.output_activation(x_hat)
@@ -349,29 +373,29 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
     ) -> dict[str, torch.Tensor]:
         mask_float = valid_mask.float() if valid_mask is not None else None
 
-        # 1. spatial branch (with mask awareness)
+        # 1. spatial branch with mask awareness
         gamma, beta = self.spatial_condition(x, mask=mask_float)
 
-        # 2. spectral branch (with mask-aware pooling)
+        # 2. spectral branch with mask-aware pooling
         x_low = F.avg_pool2d(x, kernel_size=2, stride=2)
         mask_low = None
         if mask_float is not None:
-            # max_pool2d keeps mask as 1.0 if at least one sub-pixel was valid, ensuring that the spectral branch receives valid context for all pixels that have any valid neighbors
+            # max pooling keeps a low-resolution pixel valid if any source pixel was valid.
             mask_low = F.max_pool2d(mask_float, kernel_size=2, stride=2)
 
         spec_feat, attn = self._spectral_encode_grid(x_low, mask=mask_low)
         spec_feat = self.downsample_spec(spec_feat)
 
-        # 3. fusion of spatial and spectral features (affine modulation)
+        # 3. fusion of spatial and spectral features by affine modulation
         fused = spec_feat * (1.0 + gamma)
         if beta is not None:
             fused = fused + beta
 
-        # 4. Latent & Entropy Bottleneck
+        # latent and entropy bottleneck
         z = self.encoder_to_latent(fused)
         z_hat, likelihoods = self.entropy_bottleneck(z)
 
-        # 5. Decoder
+        # decoder reconstructs all spectral bands from the quantized latent map
         x_hat = self.decoder(z_hat)
         x_hat = self._refine_output(x_hat)
         x_hat = self.output_activation(x_hat)
@@ -386,6 +410,7 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
 
     def compress(self, x: torch.Tensor, valid_mask: torch.Tensor | None = None) -> dict:
         z = self.encode(x, valid_mask=valid_mask)
+        # real compression stores quantized latent symbols as entropy-coded byte strings.
         strings = self.entropy_bottleneck.compress(z)
         return {
             "strings": [strings] if isinstance(strings, bytes) else strings,
@@ -399,6 +424,7 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
     ) -> dict:
         _ = z_shape
         _ = valid_mask
+        # decompression restores z_hat first and then uses the learned decoder.
         z_hat = self.entropy_bottleneck.decompress(strings, shape)
         x_hat = self.decode(z_hat)
         return {
@@ -408,6 +434,7 @@ class SpectralFirstMambaAutoencoderV2(nn.Module):
 
     @property
     def proxy_bpppc(self) -> float:
+        # proxy bitrate measures latent scalar slots per original spectral pixel.
         latent_h = 32
         latent_w = 32
         input_h = 128

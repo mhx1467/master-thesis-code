@@ -64,6 +64,7 @@ def train_one_epoch(
 
     for batch in progress:
         if isinstance(batch, dict):
+            # datasets with masks return dictionaries, plain tensors are still supported.
             x = batch["x"].to(device, non_blocking=True)
             mask = batch.get("valid_mask")
             mask = mask.to(device, non_blocking=True) if mask is not None else None
@@ -72,6 +73,7 @@ def train_one_epoch(
             mask = None
 
         optimizer.zero_grad(set_to_none=True)
+        # autocast reduces memory and speeds up cuda training when mixed precision is enabled.
         with torch.autocast(
             device_type=device.type,
             enabled=use_amp,
@@ -82,10 +84,12 @@ def train_one_epoch(
             except TypeError:
                 outputs = model(x)
             x_hat = outputs.get("x_hat_for_loss", outputs["x_hat"]).float()
+            # some models train on sampled or transformed targets instead of the full input.
             x_target = outputs.get("x_target", x)
             mask_for_loss = outputs.get("mask_for_loss", mask)
             likelihoods = outputs.get("likelihoods")
 
+            # rd models expose likelihoods so the loss can balance distortion and rate
             if likelihoods is not None and isinstance(loss_fn, RateDistortionLoss):
                 loss, D, R = loss_fn(x_hat, x_target, mask_for_loss, likelihoods)
             else:
@@ -93,6 +97,7 @@ def train_one_epoch(
                 D, R = loss, torch.tensor(0.0)
 
         if scaler is not None and use_amp:
+            # gradient scaler prevents fp16 underflow during mixed precision training.
             scaler.scale(loss).backward()
             if grad_clip_max_norm > 0.0:
                 scaler.unscale_(optimizer)
@@ -102,10 +107,12 @@ def train_one_epoch(
         else:
             loss.backward()
             if grad_clip_max_norm > 0.0:
+                # clipping limits unstable updates in deep sequence models.
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
             optimizer.step()
 
         if aux_optimizer is not None:
+            # compressai entropy bottlenecks need their quantile parameters optimized separately
             aux_loss = sum(
                 m.loss()
                 for m in model.modules()
@@ -117,6 +124,7 @@ def train_one_epoch(
                 aux_optimizer.step()
 
         with torch.no_grad():
+            # metrics are computed without gradients to avoid storing unnecessary activations.
             masked_mse_val = (
                 masked_mse(x_hat, x_target, mask_for_loss)
                 if mask_for_loss is not None
@@ -141,6 +149,7 @@ def train_one_epoch(
                 else torch.tensor(0.0, device=device)
             )
             if fast_metrics:
+                # expensive spectral metrics can be skipped during fast training sweeps
                 skipped_metric = torch.tensor(float("nan"), device=device)
                 masked_sam_val = skipped_metric
                 masked_sid_val = skipped_metric
@@ -180,6 +189,7 @@ def train_one_epoch(
             "invalid_mae": invalid_mae_val.item(),
         }
         for k, v in metrics.items():
+            # totals are averaged over batches at the end of the epoch.
             totals[k] += v
         num_batches += 1
 
@@ -189,6 +199,7 @@ def train_one_epoch(
             )
 
     n = max(num_batches, 1)
+    # reduce_mean makes metrics comparable in single-process and distributed runs.
     out = {k: reduce_mean(v / n, device) for k, v in totals.items()}
     out["epoch_time_sec"] = reduce_mean(time.perf_counter() - start_time, device)
     return out

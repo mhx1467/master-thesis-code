@@ -346,6 +346,7 @@ def _reconstruct_sample(
     mask = mask.unsqueeze(0).to(device) if mask is not None else None
     recons = {}
     for loaded in models:
+        # every checkpoint reconstructs the exact same input sample for fair visual comparison.
         with torch.autocast(
             device_type=device.type,
             enabled=use_amp and device.type == "cuda",
@@ -366,9 +367,11 @@ def _save_rgb_error_grid(
     dpi: int,
     save_pdf: bool,
 ) -> None:
+    # use one rgb stretch from the original image so reconstructions are visually comparable.
     rgb_params = _reference_rgb_params(x_np, bands=bands, valid_pixels=valid_pixels)
     original_rgb = _rgb_with_params(x_np, bands=bands, params=rgb_params, valid_pixels=valid_pixels)
     error_maps = {
+        # error maps show mean absolute spectral error at each spatial location.
         label: _error_map(x_hat, x_np, valid_pixels=valid_pixels)
         for label, x_hat in recons_np.items()
     }
@@ -376,6 +379,7 @@ def _save_rgb_error_grid(
         [err[np.isfinite(err)].reshape(-1) for err in error_maps.values()]
     )
     err_vmax = float(np.percentile(finite_values, 99.0)) if finite_values.size else 1.0
+    # percentile cap prevents one outlier pixel from hiding the rest of the error structure.
     err_vmax = max(err_vmax, 1e-8)
 
     labels = list(recons_np)
@@ -388,6 +392,7 @@ def _save_rgb_error_grid(
     axes[1, 0].text(0.02, 0.5, f"RGB bands: {bands}\nError: mean |x-x_hat| over bands", va="center")
 
     for col, label in enumerate(labels, start=1):
+        # top row shows rgb reconstruction, bottom row shows spatial error.
         recon_rgb = _rgb_with_params(
             recons_np[label], bands=bands, params=rgb_params, valid_pixels=valid_pixels
         )
@@ -420,6 +425,7 @@ def _save_spectra_plot(
     x_axis = np.arange(x_np.shape[0])
     fig, axes = plt.subplots(1, len(coords), figsize=(5.2 * len(coords), 4.2), squeeze=False)
     for ax, (row, col) in zip(axes[0], coords, strict=True):
+        # spectra plots expose band-level errors that rgb images can hide.
         ax.plot(x_axis, x_np[:, row, col], label="Original", linewidth=2.2, color="black")
         for label, x_hat in recons_np.items():
             ax.plot(x_axis, x_hat[:, row, col], label=label, linewidth=1.4)
@@ -447,6 +453,7 @@ def _save_mean_spectrum_plot(
 ) -> None:
     x_axis = np.arange(x_np.shape[0])
     fig, ax = plt.subplots(figsize=(8.4, 4.6))
+    # mean spectrum gives one compact summary of reconstruction bias across valid pixels.
     ax.plot(
         x_axis, x_np[:, valid_pixels].mean(axis=1), label="Original", linewidth=2.2, color="black"
     )
@@ -467,6 +474,7 @@ def _save_mean_spectrum_plot(
 def _write_summary_markdown(
     output_dir: Path, sample_records: list[dict], models: list[LoadedModel]
 ) -> None:
+    # markdown summary links figures and metrics into one human-readable artifact.
     lines = [
         "# Qualitative Reconstruction Export",
         "",
@@ -526,6 +534,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = build_dataset(
+        # qualitative export uses the reference preprocessed benchmark artifacts.
         dataset_root=dataset_root,
         split_name=args.split,
         difficulty=args.difficulty,
@@ -537,6 +546,7 @@ def main() -> None:
     )
     first = dataset[0]
     in_channels = int(first["x"].shape[0])
+    # default rgb bands are chosen from available spectral bands when not specified.
     rgb_bands = (
         tuple(_parse_csv_ints(args.rgb_bands))
         if args.rgb_bands is not None
@@ -552,12 +562,14 @@ def main() -> None:
     print(f"RGB bands: {rgb_bands}")
 
     specs = _parse_checkpoints(args.checkpoint)
+    # load all checkpoints once so every selected sample uses the same models.
     models = [_load_model(spec, in_channels=in_channels, device=device) for spec in specs]
     print("Loaded checkpoints:")
     for loaded in models:
         print(f"  {loaded.label}: {loaded.path}")
 
     if args.selection_mode == "fixed":
+        # fixed indices are useful when comparing the same examples across runs.
         sample_indices = _select_fixed_indices(len(dataset), args.sample_indices)
     else:
         selection_model = next(
@@ -569,6 +581,7 @@ def main() -> None:
                 f"--selection-checkpoint-label={args.selection_checkpoint_label!r} "
                 f"not found in loaded labels {[m.label for m in models]}"
             )
+        # error quantiles choose easy, medium, and hard examples from a model's errors.
         sample_indices = _select_error_quantile_indices(
             dataset=dataset,
             model=selection_model,
@@ -598,6 +611,7 @@ def main() -> None:
         recons_np = {label: tensor.numpy() for label, tensor in recons.items()}
         valid_pixels = _valid_pixel_mask(mask_cpu, h=x_np.shape[1], w=x_np.shape[2])
         anchor_label = models[-1].label
+        # spectrum coordinates are selected from the last model's error map.
         anchor_error = _error_map(recons_np[anchor_label], x_np, valid_pixels)
         coords = _choose_spectrum_coords(
             valid_pixels=valid_pixels,
@@ -607,7 +621,9 @@ def main() -> None:
         )
 
         metrics = {
-            label: _sample_metrics(tensor, x_cpu, mask_cpu) for label, tensor in recons.items()
+            # store numerical metrics next to figures so examples are not judged only visually.
+            label: _sample_metrics(tensor, x_cpu, mask_cpu)
+            for label, tensor in recons.items()
         }
 
         title = f"{args.difficulty}/{args.split} index={sample_index} patch={patch_id}"
@@ -658,6 +674,7 @@ def main() -> None:
         print(f"Saved qualitative sample: {sample_dir}")
 
     manifest = {
+        # manifest records all inputs needed to recreate the qualitative export.
         "dataset_root": str(dataset_root),
         "split": args.split,
         "difficulty": args.difficulty,

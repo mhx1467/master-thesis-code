@@ -13,8 +13,9 @@ class SpectralRefinementBlock(nn.Module):
         self.conv2 = nn.Conv1d(hidden, in_channels, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, H, W)
+        # x is a hyperspectral batch with channels as spectral bands.
         b, c, h, w = x.shape
+        # reshape spatial positions into a sequence so conv1d can refine across them.
         seq = x.reshape(b, c, h * w)
         delta = self.conv1(seq)
         delta = self.act(delta)

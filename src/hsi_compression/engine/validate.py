@@ -37,6 +37,7 @@ def validate_one_epoch(
 
     def _get_proxy_bpppc(model_obj) -> float | None:
         model_raw = model_obj.module if hasattr(model_obj, "module") else model_obj
+        # proxy bitrate is only a diagnostic when no bitstream has been measured
         proxy = getattr(model_raw, "proxy_bpppc", None)
         if proxy is not None:
             return float(proxy)
@@ -72,6 +73,7 @@ def validate_one_epoch(
 
     for batch in progress:
         if isinstance(batch, dict):
+            # validation accepts the same batch formats as training.
             x = batch["x"].to(device, non_blocking=True)
             mask = batch.get("valid_mask")
             mask = mask.to(device, non_blocking=True) if mask is not None else None
@@ -92,6 +94,7 @@ def validate_one_epoch(
             x_hat_for_loss = outputs.get("x_hat_for_loss", x_hat).float()
             x_target = outputs.get("x_target", x)
             mask_for_loss = outputs.get("mask_for_loss", mask)
+            # some models train on a transformed target but report metrics on the input domain
             metric_target = x_target if tuple(x_hat.shape) == tuple(x_target.shape) else x
             metric_mask = mask_for_loss if tuple(x_hat.shape) == tuple(x_target.shape) else mask
             z = outputs.get("z")
@@ -117,6 +120,7 @@ def validate_one_epoch(
             else psnr(x_hat, metric_target, data_range=1.0)
         )
         masked_sam_val = (
+            # sam is optional because it is slower than pixelwise errors.
             masked_sam_deg(x_hat, metric_target, metric_mask)
             if (compute_sam and metric_mask is not None)
             else (sam_deg(x_hat, metric_target) if compute_sam else None)
@@ -142,6 +146,7 @@ def validate_one_epoch(
         totals["ssim"] += ssim_val.item()
         totals["invalid_mae"] += invalid_mae_val.item()
         if compute_sam:
+            # sid is grouped with sam because both are spectral metrics and relatively costly.
             totals["masked_sam_deg"] += masked_sam_val.item()
             totals["sam_deg"] += sam_val.item()
             totals["masked_sid"] += (
@@ -157,11 +162,13 @@ def validate_one_epoch(
                 latent_shape = tuple(z.shape[1:])
 
             if likelihoods is not None:
+                # likelihood bitrate is estimated from the entropy model, not from real bytes
                 has_likelihoods = True
                 totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
 
         model_proxy_bpppc = _get_proxy_bpppc(model)
         if model_proxy_bpppc is not None:
+            # proxy and ref fields are kept equal until an actual bitstream is measured.
             totals["proxy_bpppc"] += model_proxy_bpppc
             totals["ref_bpppc"] += model_proxy_bpppc
 
@@ -172,6 +179,7 @@ def validate_one_epoch(
             progress.set_postfix(postfix)
 
     n = max(num_batches, 1)
+    # average each accumulated metric over validation batches.
     out = {
         k: reduce_mean(v / n, device)
         for k, v in totals.items()
@@ -183,6 +191,7 @@ def validate_one_epoch(
         out["sid"] = None
         out["masked_sid"] = None
     if not has_likelihoods:
+        # keep the field explicit so downstream reports do not confuse missing rate estimates
         out["likelihood_bpppc"] = None
     out["latent_shape"] = latent_shape
     out["epoch_time_sec"] = reduce_mean(time.perf_counter() - start_time, device)

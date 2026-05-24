@@ -25,9 +25,11 @@ def _ensure_chw(x: np.ndarray, channel_first: bool | None = None) -> np.ndarray:
     if channel_first is False:
         return np.transpose(x, (2, 0, 1))
 
+    # if the first dimension is relatively small, treat it as spectral channels.
     if x.shape[0] <= 256 and x.shape[1] > 16 and x.shape[2] > 16:
         return x
 
+    # otherwise assume the array is stored as height, width, channels.
     return np.transpose(x, (2, 0, 1))
 
 
@@ -73,6 +75,7 @@ def mean_spectrum(
     flat = x_chw.reshape(c, -1)
 
     if mask_np is None:
+        # without a mask, every spatial position contributes to the mean spectrum.
         return flat.mean(axis=1).astype(np.float32)
 
     valid = mask_np.reshape(-1)
@@ -95,6 +98,7 @@ def sample_valid_pixels(
 
     n = min(n, len(ys))
     rng = np.random.default_rng(seed)
+    # seeded sampling makes example spectra reproducible in reports.
     idx = rng.choice(len(ys), size=n, replace=False)
 
     return [(int(ys[i]), int(xs[i])) for i in idx]
@@ -122,6 +126,7 @@ def plot_spectrum(
         raise ValueError("wavelengths and spectrum must have the same length")
 
     if ax is None:
+        # create an axis only when the caller did not provide a subplot.
         fig, ax = plt.subplots(figsize=figsize)
 
     ax.plot(x_axis, spec, label=label)
@@ -164,6 +169,7 @@ def plot_pixel_spectra(
         fig, ax = plt.subplots(figsize=figsize)
 
     for row, col in coords:
+        # plot each selected pixel as one full spectral curve.
         spec = extract_spectrum(x_chw, row=row, col=col, channel_first=True)
         ax.plot(x_axis, spec, label=f"({row}, {col})")
 
@@ -197,6 +203,7 @@ def plot_random_spectra(
     _, h, w = x_chw.shape
 
     if mask is not None:
+        # valid masks keep random spectra away from nodata areas.
         coords = sample_valid_pixels(mask=mask, n=n, seed=seed)
     else:
         rng = np.random.default_rng(seed)

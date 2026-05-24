@@ -11,6 +11,7 @@ class ResidualConvBlock(nn.Module):
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # residual block learns a correction while preserving the incoming feature map.
         residual = x
         x = self.conv1(x)
         x = self.act(x)
@@ -45,9 +46,12 @@ class SpectralFirstDecoder(nn.Module):
         self.head = nn.Conv2d(hidden_channels, out_channels, kernel_size=3, padding=1)
 
     def forward(self, z_q: torch.Tensor) -> torch.Tensor:
+        # start from the quantized latent grid and build hidden image features.
         x = self.stem(z_q)
+        # first interpolation doubles spatial size without changing channel count.
         x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
         x = self.up1(x)
+        # second interpolation restores the original 128x128 patch size.
         x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
         x = self.up2(x)
         return self.head(x)

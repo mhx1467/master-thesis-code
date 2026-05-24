@@ -31,4 +31,5 @@ class SpectralPreservingDownsample(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # depthwise convolutions downsample each spectral band separately.
         return self.net(x)

@@ -53,15 +53,18 @@ class Standardizer:
 
     @classmethod
     def fit(cls, values: np.ndarray, eps: float = 1e-6) -> Standardizer:
+        # targets are standardized using train statistics so regression losses are balanced.
         mean = values.mean(axis=0).astype(np.float32)
         std = values.std(axis=0).astype(np.float32)
         std = np.maximum(std, eps).astype(np.float32)
         return cls(mean=mean, std=std, eps=eps)
 
     def transform(self, values: np.ndarray) -> np.ndarray:
+        # standardization maps each target to roughly zero mean and unit variance.
         return ((values - self.mean) / self.std).astype(np.float32)
 
     def inverse_transform(self, values: np.ndarray) -> np.ndarray:
+        # predictions are transformed back before reporting real target metrics.
         return (values * self.std + self.mean).astype(np.float32)
 
     def to_dict(self) -> dict[str, Any]:
@@ -102,6 +105,7 @@ class SpectralStatsRegressor(nn.Module):
         layers: list[nn.Module] = []
         prev_dim = input_dim
         for _ in range(num_layers - 1):
+            # hidden layers learn nonlinear relations between spectral statistics and soil values.
             layers.extend(
                 [
                     nn.Linear(prev_dim, hidden_dim),
@@ -144,6 +148,7 @@ class SpectralSetRegressor(nn.Module):
         encoder_layers: list[nn.Module] = []
         prev_dim = in_channels
         for _ in range(pixel_layers):
+            # each pixel spectrum is encoded independently before set pooling.
             encoder_layers.extend(
                 [
                     nn.Linear(prev_dim, hidden_dim),
@@ -160,6 +165,7 @@ class SpectralSetRegressor(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
+        # final representation contains attention pool, mean pool, and valid pixel fraction.
         head_input_dim = hidden_dim * 2 + 1
         head: list[nn.Module] = []
         prev_dim = head_input_dim
@@ -191,14 +197,17 @@ class SpectralSetRegressor(nn.Module):
         pixels = torch.nan_to_num(pixels, nan=0.0, posinf=0.0, neginf=0.0)
         empty_rows = ~valid_mask.any(dim=1)
         if empty_rows.any():
+            # avoid all-masked rows because softmax over only invalid pixels would be undefined.
             valid_mask = valid_mask.clone()
             valid_mask[empty_rows, 0] = True
 
         encoded = self.pixel_encoder(pixels)
         mask_f = valid_mask.unsqueeze(-1).to(encoded.dtype)
         denom = mask_f.sum(dim=1).clamp_min(1.0)
+        # mean pooling gives a stable global summary of all valid pixels.
         mean_pool = (encoded * mask_f).sum(dim=1) / denom
 
+        # attention pooling lets the model emphasize informative pixels in the set
         scores = self.attention(encoded).squeeze(-1)
         scores = scores.masked_fill(~valid_mask, torch.finfo(scores.dtype).min)
         weights = torch.softmax(scores, dim=1).unsqueeze(-1)
@@ -226,17 +235,14 @@ def _parse_float(value: Any) -> float:
 
 
 def infer_split(path: Path) -> str:
+    # hyperview2 releases use several naming conventions, so infer split from path tokens
     parts = {part.lower() for part in path.parts}
     name = path.name.lower()
     stem = path.stem.lower()
     tokens = parts | {name, stem}
     if tokens & {"train", "training"} or stem == "t" or stem.startswith("train"):
         return "train"
-    if (
-        tokens & {"val", "valid", "validation"}
-        or stem == "v"
-        or stem.startswith(("val", "valid"))
-    ):
+    if tokens & {"val", "valid", "validation"} or stem == "v" or stem.startswith(("val", "valid")):
         return "validation"
     if tokens & {"test", "testing", "psi", "ψ"} or stem.startswith("test"):
         return "test"
@@ -244,6 +250,7 @@ def infer_split(path: Path) -> str:
 
 
 def infer_modality(path: Path) -> str:
+    # modality inference keeps prisma, airborne, sentinel, and masks separated
     text = path.as_posix().lower()
     name = path.name.lower()
     parts = {part.lower() for part in path.parts}
@@ -270,6 +277,7 @@ def find_label_csv(dataset_root: Path, target_columns: Sequence[str]) -> Path:
             continue
         overlap = len(target_keys & headers)
         if overlap == len(target_keys):
+            # prefer train csv when several label tables contain the same targets.
             candidates.append((0 if "train" in path.as_posix().lower() else 1, path))
     if not candidates:
         raise FileNotFoundError(
@@ -286,6 +294,7 @@ def _resolve_columns(
     by_key = {normalize_key(header): header for header in headers}
     target_resolved = []
     for column in target_columns:
+        # resolve target names case-insensitively and ignoring punctuation.
         key = normalize_key(column)
         if key not in by_key:
             raise ValueError(f"Missing target column {column!r}. Available columns: {headers}")
@@ -301,10 +310,12 @@ def _resolve_columns(
     for candidate in ID_COLUMN_CANDIDATES:
         key = normalize_key(candidate)
         if key in by_key and key not in target_keys:
+            # choose the first known id-like column that is not a target value.
             return by_key[key], target_resolved
 
     for header in headers:
         if normalize_key(header) not in target_keys:
+            # fallback for custom csv files: use the first non-target column as id.
             return header, target_resolved
     raise ValueError("Could not infer an id column from label CSV.")
 
@@ -331,6 +342,7 @@ def _read_label_rows(
 
 
 def _clean_identifier(value: str) -> str:
+    # remove modality and file-type words so image files and label rows match by core id.
     text = Path(value).stem if any(sep in value for sep in ("/", "\\")) else value
     text = normalize_key(text)
     for token in (
@@ -386,10 +398,12 @@ def _index_paths(dataset_root: Path, modality: str, split: str | None = None) ->
         if modality != "any" and inferred != modality:
             continue
         for candidate in _path_id_candidates(path):
+            # one file can have several useful aliases depending on naming convention.
             buckets.setdefault(candidate, []).append(path)
 
     index = {}
     for key, paths in buckets.items():
+        # shortest path is preferred to avoid selecting derived or deeply nested duplicates.
         unique = sorted(set(paths), key=lambda item: (len(item.as_posix()), item.as_posix()))
         if unique:
             index[key] = unique[0]
@@ -418,6 +432,7 @@ def build_hyperview2_samples(
     label_rows = _read_label_rows(label_path, target_columns, id_column)
     label_split = infer_split(label_path)
     array_split = None if label_split == "unknown" else label_split
+    # index image arrays and masks separately because masks are optional.
     array_index = _index_paths(root, modality, split=array_split)
     mask_index = _index_paths(root, "mask", split=array_split)
 
@@ -425,6 +440,7 @@ def build_hyperview2_samples(
     missing = []
     for raw_id, target in label_rows:
         key = _canonical_identifier(raw_id)
+        # try all aliases of the label id until an image file is found.
         path = next(
             (array_index[alias] for alias in _identifier_aliases(raw_id) if alias in array_index),
             None,
@@ -459,6 +475,7 @@ def load_array(path: str | Path, modality: str = "any") -> np.ndarray:
         array = np.load(path)
     elif suffix == ".npz":
         with np.load(path) as archive:
+            # npz files can contain several arrays; choose the largest image-like one.
             candidates = [archive[key] for key in archive.files if archive[key].ndim >= 3]
             if not candidates:
                 raise ValueError(f"No 3D array found in {path}")
@@ -474,6 +491,7 @@ def load_array(path: str | Path, modality: str = "any") -> np.ndarray:
 def to_chw(array: np.ndarray, expected_bands: int | None = None) -> np.ndarray:
     array = np.asarray(array)
     while array.ndim > 3:
+        # remove singleton dimensions that often come from exported remote-sensing files.
         singleton_axes = [axis for axis, dim in enumerate(array.shape) if dim == 1]
         if not singleton_axes:
             break
@@ -485,11 +503,13 @@ def to_chw(array: np.ndarray, expected_bands: int | None = None) -> np.ndarray:
 
     shape = tuple(int(dim) for dim in array.shape)
     if expected_bands is not None:
+        # if modality is known, use its band count to identify the spectral axis.
         axes = [axis for axis, dim in enumerate(shape) if dim == expected_bands]
     else:
         known = set(EXPECTED_BANDS_BY_MODALITY.values())
         axes = [axis for axis, dim in enumerate(shape) if dim in known]
     if not axes:
+        # fallback heuristic: spectral axis is usually the smaller outer dimension.
         axes = [0] if shape[0] <= shape[-1] else [2]
 
     band_axis = axes[0]
@@ -510,6 +530,7 @@ def load_mask(path: str | Path | None, shape_hw: tuple[int, int]) -> np.ndarray 
     )
     mask = np.squeeze(mask)
     if mask.ndim == 3:
+        # collapse mask cubes to one spatial mask when needed.
         if mask.shape[0] == 1:
             mask = mask[0]
         elif mask.shape[-1] == 1:
@@ -531,6 +552,7 @@ def normalize_cube(
     cube = np.asarray(cube, dtype=np.float32)
     finite = np.isfinite(cube)
     if mask is not None:
+        # normalization statistics should ignore pixels outside the valid mask.
         finite &= mask[None]
     values = cube[finite]
     if values.size == 0:
@@ -541,6 +563,7 @@ def normalize_cube(
         low = float(values.min())
         high = float(values.max())
     elif mode == "percentile":
+        # percentile scaling is more robust to outliers than raw minmax.
         low, high = np.percentile(values, [percentile_low, percentile_high]).astype(np.float32)
         low = float(low)
         high = float(high)
@@ -559,6 +582,7 @@ def extract_spectral_stats(
     cube = normalize_cube(cube, mask=mask, mode=normalization)
     c, h, w = cube.shape
     flat = cube.reshape(c, h * w)
+    # valid pixels are the only ones used for spectral statistics.
     valid = mask.reshape(h * w).astype(bool) if mask is not None else np.isfinite(flat).all(axis=0)
     valid_fraction = float(valid.mean()) if valid.size else 0.0
     if not valid.any():
@@ -593,6 +617,7 @@ class Hyperview2FeatureDataset(Dataset):
         sample = self.samples[idx]
         cube = load_array(sample.array_path, modality=self.modality)
         mask = load_mask(sample.mask_path, shape_hw=tuple(cube.shape[-2:]))
+        # feature baseline uses simple mean and std per band instead of all pixels.
         features = extract_spectral_stats(cube, mask=mask, normalization=self.normalization)
         return {
             "features": torch.from_numpy(features),
@@ -628,6 +653,7 @@ class Hyperview2PixelSetDataset(Dataset):
         mask = load_mask(sample.mask_path, shape_hw=tuple(cube.shape[-2:]))
         cube = normalize_cube(cube, mask=mask, mode=self.normalization)
         c, h, w = cube.shape
+        # every spatial pixel becomes one row with c spectral values.
         pixels = cube.reshape(c, h * w).T.astype(np.float32, copy=False)
         if mask is not None:
             valid = mask.reshape(h * w).astype(bool)
@@ -636,6 +662,7 @@ class Hyperview2PixelSetDataset(Dataset):
         if self.max_pixels is not None and pixels.shape[0] > self.max_pixels:
             valid_indices = np.flatnonzero(valid)
             if valid_indices.size > self.max_pixels:
+                # deterministic subsampling keeps runs reproducible.
                 take = np.linspace(0, valid_indices.size - 1, self.max_pixels, dtype=np.int64)
                 selected = valid_indices[take]
             else:
@@ -682,6 +709,7 @@ class Hyperview2CompressionDataset(Dataset):
         if mask is None:
             valid_mask = np.isfinite(cube)
         else:
+            # compressor loss needs a per-value mask, so broadcast the spatial mask over bands.
             valid_mask = np.broadcast_to(mask[None], (c, h, w)).copy()
         return {
             "x": torch.from_numpy(np.ascontiguousarray(cube, dtype=np.float32)),
@@ -710,6 +738,7 @@ def collate_pixel_set_batch(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
     pixels = torch.zeros(batch_size, max_pixels, in_channels, dtype=torch.float32)
     valid_mask = torch.zeros(batch_size, max_pixels, dtype=torch.bool)
     for idx, item in enumerate(batch):
+        # pad shorter pixel sets so they can share one tensor batch.
         n_pixels = int(item["pixels"].shape[0])
         pixels[idx, :n_pixels] = item["pixels"]
         valid_mask[idx, :n_pixels] = item["valid_mask"]
@@ -741,6 +770,7 @@ def collate_compression_batch(
     in_channels = channels.pop()
     max_h = max(int(item["x"].shape[-2]) for item in batch)
     max_w = max(int(item["x"].shape[-1]) for item in batch)
+    # pad to model-friendly multiples because encoders downsample spatial dimensions.
     padded_h = _padded_size(max_h, pad_multiple=pad_multiple, min_size=min_spatial_size)
     padded_w = _padded_size(max_w, pad_multiple=pad_multiple, min_size=min_spatial_size)
 
@@ -753,6 +783,7 @@ def collate_compression_batch(
         h, w = int(x.shape[-2]), int(x.shape[-1])
         pad_h = padded_h - h
         pad_w = padded_w - w
+        # replicate padding avoids creating sharp zero borders in the input tensor.
         xs[idx] = F.pad(x.unsqueeze(0), (0, pad_w, 0, pad_h), mode="replicate").squeeze(0)
         masks[idx, :, :h, :w] = valid_mask
         original_shapes.append(tuple(int(dim) for dim in x.shape))
@@ -774,6 +805,7 @@ def split_samples(
         raise ValueError("val_fraction must be in (0, 1)")
     rng = np.random.default_rng(seed)
     indices = np.arange(len(samples))
+    # fixed seed gives reproducible train and validation partitions.
     rng.shuffle(indices)
     val_count = max(1, int(round(len(samples) * val_fraction)))
     val_indices = set(indices[:val_count].tolist())
@@ -791,6 +823,7 @@ def hyperview_score(
     eps: float = 1e-12,
 ) -> tuple[float, np.ndarray]:
     mse = ((y_pred - y_true) ** 2).mean(axis=0)
+    # official-style score normalizes each target mse by a baseline mse.
     per_target = mse / np.maximum(baseline_mse, eps)
     return float(per_target.mean()), per_target.astype(np.float32)
 

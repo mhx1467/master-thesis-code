@@ -19,6 +19,7 @@ class Baseline3DAutoencoder(nn.Module):
         self.output_activation = output_activation
         h1, h2 = hidden_channels
 
+        # first reduce many spectral bands with pointwise 2d convolutions.
         self.spectral_encoder_2d = nn.Sequential(
             nn.Conv2d(in_channels, spectral_reduced * 2, kernel_size=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -26,6 +27,7 @@ class Baseline3DAutoencoder(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
+        # then process the reduced spectral cube with 3d convolutions.
         self.enc3d = nn.Sequential(
             nn.Conv3d(1, h1, kernel_size=3, stride=(2, 2, 2), padding=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -35,6 +37,7 @@ class Baseline3DAutoencoder(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
+        # decoder mirrors the 3d encoder before restoring all original bands.
         self.dec3d = nn.Sequential(
             nn.ConvTranspose3d(
                 latent_channels,
@@ -69,6 +72,7 @@ class Baseline3DAutoencoder(nn.Module):
         self.entropy_bottleneck = EntropyBottleneck(latent_channels * (spectral_reduced // 4))
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
+        # x starts as channel-first 2d image; unsqueeze makes it a 3d volume.
         x_s = self.spectral_encoder_2d(x)
         x3d = x_s.unsqueeze(1)
         return self.enc3d(x3d)
@@ -76,6 +80,7 @@ class Baseline3DAutoencoder(nn.Module):
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         x3d = self.dec3d(z)
 
+        # transpose convolutions may produce one extra or missing spectral slice.
         if x3d.shape[2] > self.spectral_reduced:
             x3d = x3d[:, :, : self.spectral_reduced]
         elif x3d.shape[2] < self.spectral_reduced:
@@ -88,6 +93,7 @@ class Baseline3DAutoencoder(nn.Module):
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         z = self.encode(x)
         n, c, d, h, w = z.shape
+        # entropy bottleneck only accepts 4d tensors, so spectral depth is folded into channels.
         z_4d = z.view(n, c * d, h, w)
         z_hat_4d, likelihoods = self.entropy_bottleneck(z_4d)
         z_hat = z_hat_4d.view(n, c, d, h, w)
@@ -120,6 +126,7 @@ class Baseline3DAutoencoder(nn.Module):
 
     @property
     def proxy_bpppc(self) -> float:
+        # proxy rate counts latent scalar positions before real entropy coding.
         latent_h = 32
         latent_w = 32
         input_h = 128

@@ -14,6 +14,7 @@ from hsi_compression.utils.distributed import is_main_process
 
 
 def _select_best_by_loss(loss_fn) -> bool:
+    # rd and symbol coding objectives are selected by loss, not by reference psnr
     return bool(hasattr(loss_fn, "lmbda") or getattr(loss_fn, "select_by_loss", False))
 
 
@@ -54,6 +55,7 @@ def fit(
 
     training_cfg = config.get("training", {})
     early_cfg = training_cfg.get("early_stopping", {})
+    # early stopping is optional because research sweeps often need fixed epoch budgets.
     early_enabled = early_cfg.get("enabled", False)
     early_patience = early_cfg.get("patience", 20)
     early_psnr_min_delta = early_cfg.get("psnr_min_delta", early_cfg.get("min_delta", 0.0))
@@ -62,6 +64,7 @@ def fit(
     if resume:
         last_path = find_resume_checkpoint(checkpoint_path)
         if last_path is not None and is_main_process():
+            # resume restores optimizer and scheduler so training continues with the same state.
             print(f"\nResuming from: {last_path}")
             ckpt = load_checkpoint(
                 path=last_path,
@@ -83,10 +86,12 @@ def fit(
             print("No last.pt found — starting training from scratch.")
 
     model_raw = model.module if hasattr(model, "module") else model
+    # unwrap distributed wrappers before counting parameters or saving checkpoints.
     num_params = sum(p.numel() for p in model_raw.parameters() if p.requires_grad)
 
     for epoch in range(start_epoch, epochs + 1):
         if train_sampler is not None:
+            # distributed samplers need the epoch to reshuffle consistently across processes.
             train_sampler.set_epoch(epoch)
 
         if device.type == "cuda":
@@ -111,6 +116,7 @@ def fit(
             fast_metrics=fast_train_metrics,
         )
 
+        # sam is more expensive than mse or psnr, so it can be computed sparsely
         compute_sam = (epoch % sam_every_n_epochs == 0) or (epoch == epochs)
 
         val_metrics = validate_one_epoch(
@@ -135,8 +141,10 @@ def fit(
 
         peak_vram_gb = None
         if device.type == "cuda":
+            # peak memory helps compare architectures during experiments.
             peak_vram_gb = torch.cuda.max_memory_allocated(device) / 1024**3
 
+        # keep one flat record so wandb and history json use the same metric names.
         record = {
             "epoch": epoch,
             "train/loss": train_metrics["loss"],
@@ -216,6 +224,7 @@ def fit(
         if is_main_process():
             if _last_save_thread is not None:
                 _last_save_thread.join()
+            # last checkpoint is saved every epoch so interrupted runs can resume
             _last_save_thread = save_last_checkpoint_async(
                 checkpoint_path=checkpoint_path,
                 epoch=epoch,
@@ -232,6 +241,7 @@ def fit(
                 selection_metric = val_loss
                 improved = selection_metric < best_selection_metric
             else:
+                # reconstruction baselines use reference psnr for checkpoint selection
                 selection_metric = val_ref_psnr
                 improved = selection_metric > best_selection_metric + early_psnr_min_delta
             if improved:
@@ -270,6 +280,7 @@ def fit(
                     )
 
                 if logger is not None:
+                    # summary values remain visible after the run finishes.
                     logger.summary["best_val_loss"] = best_val_loss
                     logger.summary["best_val_ref_psnr"] = best_val_ref_psnr
                     logger.summary["best_val_ssim"] = record["val/ssim"]
@@ -281,6 +292,7 @@ def fit(
 
                     import wandb
 
+                    # store the best checkpoint as an artifact for reproducible retrieval.
                     artifact = wandb.Artifact(
                         name=f"model-{logger.id}",
                         type="model",
@@ -308,6 +320,7 @@ def fit(
             break
 
     if _last_save_thread is not None:
+        # wait for asynchronous checkpoint write before returning from training.
         _last_save_thread.join()
 
     return {

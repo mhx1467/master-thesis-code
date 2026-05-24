@@ -40,21 +40,24 @@ def _npy_path(tif_path: Path) -> Path:
 
 
 def _preprocess_tif(tif_path: Path) -> np.ndarray:
-    raw = tiff.imread(str(tif_path))  # (224, H, W) int16
+    raw = tiff.imread(str(tif_path))  # shape is bands, height, width
 
     if raw.ndim != 3:
         raise ValueError(f"unexpected ndim={raw.ndim}, shape={raw.shape}")
 
     x = raw.astype(np.float32)
+    # nodata pixels are replaced before clipping so they do not create invalid ranges
     x[x == NODATA_VALUE] = 0.0
 
+    # remove water vapor bands to match the benchmark channel count
     keep = [i for i in range(x.shape[0]) if i not in WATER_VAPOR_BANDS]
-    x = x[keep]  # (202, H, W)
+    x = x[keep]
 
     if x.shape[0] != EXPECTED_BANDS:
         raise ValueError(f"unexpected band count after drop: {x.shape[0]}")
 
     x = np.clip(x, CLIP_MIN, CLIP_MAX)
+    # global scaling keeps all converted files on the same reference range
     x = (x - CLIP_MIN) / (CLIP_MAX - CLIP_MIN)
 
     x = np.ascontiguousarray(x, dtype=np.float32)
@@ -153,7 +156,7 @@ def main():
         print(f"Error: directory {patches_dir} does not exist")
         sys.exit(1)
 
-    # Find all TIF files
+    # find all tif files
     tif_files = sorted(patches_dir.rglob("*-SPECTRAL_IMAGE.TIF"))
     if not tif_files:
         tif_files = sorted(patches_dir.rglob("*-SPECTRAL_IMAGE.tif"))
@@ -166,6 +169,7 @@ def main():
     wrong_shape = 0
     for f in existing_npy:
         try:
+            # quick mmap check avoids loading full arrays while counting usable outputs.
             arr = np.load(str(_npy_path(f)), mmap_mode="r")
             if arr.shape == EXPECTED_SHAPE_CHW and arr.dtype == np.float32:
                 correct_shape += 1
@@ -193,6 +197,7 @@ def main():
     print()
 
     if args.dry_run:
+        # dry run reports planned work without touching existing artifacts.
         print(
             "Dry-run mode — no changes. Existing DATA.npy files are not trusted without TIF parity check."
         )
@@ -203,6 +208,7 @@ def main():
     error_list = []
 
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        # conversion is parallel because every patch can be processed independently.
         futures = {executor.submit(convert_one, a): a[0] for a in job_args}
         with tqdm(total=len(tif_files), unit="file", desc="Conversion") as bar:
             for future in as_completed(futures):
@@ -227,6 +233,7 @@ def main():
             print(f"  {name}: {msg}")
 
     if args.verify or counts["error"] == 0:
+        # sample verification catches shape, dtype, and range problems after conversion.
         all_npy = [_npy_path(f) for f in tif_files if _npy_path(f).exists()]
         verify_sample(all_npy)
 
