@@ -522,7 +522,9 @@ def main() -> None:
     args = parse_args()
 
     dataset_root = Path(
-        args.dataset_root or os.environ.get("DATASET_ROOT") or "/data/hyspecnet-11k"
+        args.dataset_root
+        or os.environ.get("DATASET_ROOT")
+        or "/workspace/data/hyspectnet-11k/hyspecnet-11k-full"
     )
     if not dataset_root.exists():
         print(f"Error: dataset_root does not exist: {dataset_root}", file=sys.stderr)

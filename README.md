@@ -53,7 +53,7 @@ pip install -e '.[lossless,dev]'
 Set the dataset root:
 
 ```bash
-export DATASET_ROOT=/path/to/hyspecnet-11k
+export DATASET_ROOT=/workspace/data/hyspectnet-11k/hyspecnet-11k-full
 ```
 
 Expected HySpecNet-11k layout:
