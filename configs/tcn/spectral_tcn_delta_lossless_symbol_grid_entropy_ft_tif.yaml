@@ -42,8 +42,8 @@ training:
   use_amp: true
   fast_train_metrics: true
   sam_every_n_epochs: 10
-  actual_codec_eval_every_n_epochs: 5
-  actual_codec_eval_batches: 1
+  actual_codec_eval_every_n_epochs: 0
+  actual_codec_eval_batches: 0
 
 logging:
   project: hsi-compression-paper
