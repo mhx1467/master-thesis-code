@@ -1,5 +1,5 @@
 experiment:
-  name: spectral_tcn_delta_lossless_symbol_grid_entropy_ft
+  name: spectral_tcn_delta_lossless_symbol_grid_entropy_ft_tif
   seed: 42
 
 data:
@@ -7,7 +7,7 @@ data:
   batch_size: 32
   num_workers: 4
   drop_invalid_channels: true
-  prefer_npy: true
+  prefer_npy: false
   pin_memory: true
   prefetch_factor: 2
   train_subset_size: 4096

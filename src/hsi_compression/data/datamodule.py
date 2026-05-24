@@ -12,7 +12,23 @@ from hsi_compression.constants import (
     WATER_VAPOR_BANDS,
 )
 from hsi_compression.datasets import HSITiffDataset
-from hsi_compression.splits import resolve_split_paths, split_csv_path
+from hsi_compression.splits import load_split_csv, resolve_split_paths, split_csv_path
+
+
+def _split_entry_to_tif_path(dataset_root: Path, rel_entry: str) -> Path:
+    rel = Path(rel_entry)
+    patch_id = rel.stem.removesuffix("-DATA")
+    return dataset_root / "patches" / rel.parent / f"{patch_id}-SPECTRAL_IMAGE.TIF"
+
+
+def _resolve_tif_split_paths(dataset_root: Path, csv_path: Path) -> list[Path]:
+    paths = [_split_entry_to_tif_path(dataset_root, entry) for entry in load_split_csv(csv_path)]
+    missing = [path for path in paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"{len(missing)} resolved TIF patch files do not exist. First missing: {missing[0]}"
+        )
+    return paths
 
 
 def build_dataset(
@@ -29,7 +45,11 @@ def build_dataset(
     _ = normalized, stats_path
     dataset_root = Path(dataset_root)
     csv_path = split_csv_path(dataset_root, split_name, difficulty)
-    paths = resolve_split_paths(dataset_root, csv_path)
+    paths = (
+        resolve_split_paths(dataset_root, csv_path)
+        if prefer_npy
+        else _resolve_tif_split_paths(dataset_root, csv_path)
+    )
 
     return HSITiffDataset(
         paths=paths,
@@ -61,6 +81,7 @@ def build_dataloader(
         generator.manual_seed(seed)
 
         def _seed_worker(worker_id: int) -> None:
+            # every worker gets a deterministic but different seed.
             worker_seed = (seed + worker_id) % (2**32)
             random.seed(worker_seed)
             np.random.seed(worker_seed)
@@ -80,6 +101,7 @@ def build_dataloader(
     }
 
     if num_workers > 0:
+        # persistent workers reduce dataloader startup overhead on large hsi datasets
         kwargs["persistent_workers"] = (
             persistent_workers if persistent_workers is not None else True
         )

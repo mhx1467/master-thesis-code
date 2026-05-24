@@ -203,12 +203,14 @@ def audit_sample(
     device: torch.device,
     original_bits_per_channel: float,
 ) -> dict[str, Any]:
+    # audit one sample end to end using the exact same public compression api as evaluation.
     x = sample["x"].unsqueeze(0).to(device=device, dtype=torch.float32)
     mask = sample.get("valid_mask")
     if mask is not None:
         mask = mask.unsqueeze(0).to(device=device)
 
     exact_grid = is_exact_symbol_grid(model, x)
+    # internal symbols define the canonical integer grid used by the lossless tcn protocol.
     symbols = model._to_symbols(x)  # noqa: SLF001 - protocol audit checks model internals.
     x_target = model._symbols_to_float(symbols)  # noqa: SLF001
 
@@ -218,6 +220,7 @@ def audit_sample(
         packed = model.compress(x, valid_mask=mask)
     except ValueError as exc:
         if "not exactly representable on the configured symbol grid" in str(exc):
+            # reject raw-float fallback when the audit is meant to validate residual coding.
             raise ValueError(
                 "The selected input source is not exactly representable on the configured "
                 "symbol grid. For the primary lossless-symbol-grid protocol, rerun with "
@@ -243,11 +246,13 @@ def audit_sample(
     x_cpu = x.detach().cpu()
     x_target_cpu = x_target.detach().cpu()
     decoded_cpu = decoded.detach().cpu()
+    # exact reconstruction is checked against the canonical symbol-grid target.
     mismatch_count = int((decoded_cpu != x_target_cpu).sum().item())
     max_abs_error = float((decoded_cpu - x_target_cpu).abs().max().item())
     input_canonical_mismatch_count = int((x_cpu != x_target_cpu).sum().item())
     input_max_canonical_abs_error = float((x_cpu - x_target_cpu).abs().max().item())
     encoded_bytes = sum_string_bytes(packed["strings"])
+    # actual bpppc is measured from real encoded bytes, not model likelihoods.
     actual_bpppc = compute_actual_bpppc_from_strings(packed["strings"], tuple(x.shape))
 
     header = read_tcn_header(packed["strings"])
@@ -284,6 +289,7 @@ def summarize(
     total_bytes = 0
     total_values = 0
     for report in sample_reports:
+        # pooled bitrate weights every sample by its number of encoded values.
         total_values += prod(int(dim) for dim in report["shape"])
         total_bytes += int(report["encoded_bytes"])
 
@@ -323,15 +329,22 @@ def summarize(
 def build_warnings(summary: dict[str, Any], checkpoint: Path | None) -> list[str]:
     warnings: list[str] = []
     backend_counts = summary["backend_counts"]
+    residual_backend_count = sum(
+        count
+        for backend, count in backend_counts.items()
+        if backend in {"zlib_residual", "tcn_residual_zlib", "tcn_residual_zstd"}
+        or backend.startswith("bitplane_tcn_residual_")
+    )
     if backend_counts.get("zlib_raw_float32", 0) > 0:
+        # raw fallback is exact but does not validate the predictive residual model.
         warnings.append(
             "At least one sample used zlib_raw_float32. That is exact, but it is not evidence "
             "that the TCN residual predictor is useful."
         )
-    if backend_counts.get("zlib_residual", 0) == 0:
+    if residual_backend_count == 0:
         warnings.append(
-            "No inspected sample used zlib_residual. Do not report this as TCN predictive "
-            "lossless compression."
+            "No inspected sample used a TCN residual backend. Do not report this as TCN "
+            "predictive lossless compression."
         )
     if not summary["all_exact_reconstruction"]:
         warnings.append("Exact reconstruction failed for at least one sample.")
@@ -386,6 +399,7 @@ def main() -> int:
     difficulty = args.difficulty or data_cfg.get("difficulty", "easy")
 
     dataset, dataset_meta = build_audit_dataset(
+        # source decides whether audit uses raw tif data or preprocessed data.npy artifacts.
         dataset_root=dataset_root,
         source=args.source,
         split=args.split,
@@ -400,6 +414,7 @@ def main() -> int:
         raise ValueError("--num-samples must be positive.")
 
     first_sample = dataset[0]
+    # model input channels must match the selected source and invalid-band handling.
     in_channels = int(first_sample["x"].shape[0])
     device = select_device(args.device)
     model = build_tcn_from_config(config, in_channels=in_channels).to(device)
@@ -408,12 +423,14 @@ def main() -> int:
     checkpoint_path = None
     if args.checkpoint is not None:
         checkpoint_path = args.checkpoint.expanduser().resolve()
+        # trained weights are required before claiming predictor bitrate improvements.
         load_checkpoint(checkpoint_path, model, map_location=device)
 
     sample_reports = []
     num_samples = min(args.num_samples, len(dataset))
     with torch.no_grad():
         for index in range(num_samples):
+            # each report keeps both reconstruction correctness and bitrate evidence.
             sample_reports.append(
                 audit_sample(
                     model=model,
@@ -443,6 +460,7 @@ def main() -> int:
 
     output_path = args.save_json or (logs_dir() / "audit_lossless_tcn_protocol.json")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # json output is the durable audit artifact used when writing the thesis.
     output_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
 
     print_report(report)

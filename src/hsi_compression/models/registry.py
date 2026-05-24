@@ -121,10 +121,13 @@ def build_spectral_tcn_lossless(in_channels: int, **kwargs):
         raw_fallback=kwargs.get("raw_fallback", True),
         pixels_per_patch=kwargs.get("pixels_per_patch"),
         prediction_mode=kwargs.get("prediction_mode", "value"),
+        residual_backend=kwargs.get("residual_backend", "zlib"),
+        residual_transform=kwargs.get("residual_transform", "none"),
     )
 
 
 def build_spectral_tcn_delta_lossless(in_channels: int, **kwargs):
+    # delta mode predicts spectral differences, so tanh is the natural bounded output
     kwargs = {
         **kwargs,
         "prediction_mode": "delta",
@@ -161,6 +164,7 @@ LEGACY_MODELS = {
 
 def build_model(model_name: str, in_channels: int, **kwargs):
     if model_name in LEGACY_MODELS:
+        # legacy models stay importable historically but are blocked from active benchmark configs
         raise ValueError(
             f"Model '{model_name}' has been moved to legacy and is no longer supported "
             f"in the active benchmark pipeline."

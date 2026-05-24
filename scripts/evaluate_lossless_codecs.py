@@ -446,6 +446,7 @@ def run_spectral_delta_zlib(
         return skipped("spectral_delta_zlib", "input is not exactly representable on symbol grid")
     x_target = symbols_to_tensor(symbols, symbol_scale)
 
+    # store the first band as-is and later bands as differences to exploit spectral smoothness.
     symbols_np = np.ascontiguousarray(symbols.numpy().astype(np.int32, copy=False))
     residuals = np.empty_like(symbols_np, dtype=np.int16)
     residuals[:, 0] = symbols_np[:, 0]
@@ -465,6 +466,7 @@ def run_spectral_delta_zlib(
 
     start = time.perf_counter()
     header, payload = unpack_payload(encoded)
+    # cumulative sum reverses the delta transform exactly.
     decoded_residuals = np.frombuffer(zlib.decompress(payload), dtype=np.int16).copy()
     decoded_residuals = decoded_residuals.reshape(header["shape"]).astype(np.int32)
     decoded_symbols = torch.from_numpy(np.cumsum(decoded_residuals, axis=1)).to(torch.int32)
@@ -500,6 +502,7 @@ def run_symbols_codec(
     x_target = symbols_to_tensor(symbols, symbol_scale)
 
     symbols_np = np.ascontiguousarray(symbols.numpy().astype(np.uint16, copy=False))
+    # bitplane order groups equal bit positions together, which can help entropy coders.
     payload = uint16_to_bitplane_bytes(symbols_np) if bitplane else symbols_np.tobytes(order="C")
 
     start = time.perf_counter()
@@ -519,6 +522,7 @@ def run_symbols_codec(
     header, compressed_payload = unpack_payload(encoded)
     decoded_payload = decompressor(compressed_payload)
     if bitplane:
+        # undo bitplane packing before converting integer symbols back to floats.
         decoded_symbols_np = bitplane_bytes_to_uint16(decoded_payload, header["shape"]).astype(
             np.int32
         )
@@ -561,11 +565,13 @@ def run_spectral_delta_codec(
     x_target = symbols_to_tensor(symbols, symbol_scale)
 
     symbols_np = np.ascontiguousarray(symbols.numpy().astype(np.int32, copy=False))
+    # residuals along the spectral axis are usually smaller than absolute symbols.
     residuals = np.empty_like(symbols_np, dtype=np.int32)
     residuals[:, 0] = symbols_np[:, 0]
     residuals[:, 1:] = symbols_np[:, 1:] - symbols_np[:, :-1]
 
     if bitplane:
+        # zigzag maps signed residuals to unsigned values before bitplane packing.
         residual_payload = uint16_to_bitplane_bytes(zigzag_encode_int32(residuals))
         payload_dtype = "uint16"
         transform = "zigzag+bitplane"
@@ -653,11 +659,10 @@ def run_tcn_residual_codec(
     model: torch.nn.Module,
     x: torch.Tensor,
     device: torch.device,
-    compressor: Callable[[bytes, int], bytes],
-    decompressor: Callable[[bytes], bytes],
     level: int,
     original_bits_per_channel: float,
-    bitplane: bool = False,
+    residual_backend: str,
+    residual_transform: str = "none",
 ) -> CodecResult:
     x_device = x.to(device=device, dtype=torch.float32)
     symbols = model._to_symbols(x_device)  # noqa: SLF001 - codec audit script uses model internals.
@@ -668,66 +673,29 @@ def run_tcn_residual_codec(
     sync_if_cuda(device)
     start = time.perf_counter()
     with torch.no_grad():
-        residuals = model._residuals_from_symbols(symbols).to(torch.int32)  # noqa: SLF001
+        # Use the public model codec path so script evaluation matches deployable payloads.
+        packed = model.compress(
+            x_device,
+            residual_backend=residual_backend,
+            residual_transform=residual_transform,
+            codec_backend=codec,
+            compression_level=level,
+        )
     sync_if_cuda(device)
-
-    residual_min = int(residuals.min().item())
-    residual_max = int(residuals.max().item())
-    residuals_np = np.ascontiguousarray(residuals.cpu().numpy().astype(np.int32, copy=False))
-    if bitplane:
-        if residual_min < -32768 or residual_max > 32767:
-            return skipped(codec, "TCN residuals do not fit int16 zigzag bitplane coding")
-        residual_payload = uint16_to_bitplane_bytes(zigzag_encode_int32(residuals_np))
-        payload_dtype = "uint16"
-        transform = "zigzag+bitplane"
-    else:
-        residual_dtype = np.int16 if residual_min >= -32768 and residual_max <= 32767 else np.int32
-        residual_payload = residuals_np.astype(residual_dtype).tobytes(order="C")
-        payload_dtype = np.dtype(residual_dtype).name
-        transform = "none"
-
-    encoded = pack_payload(
-        {
-            "codec_backend": codec,
-            "dtype": payload_dtype,
-            "shape": list(residuals.shape),
-            "symbol_scale": int(model.symbol_scale),
-            "prediction_mode": getattr(model, "prediction_mode", "value"),
-            "transform": transform,
-        },
-        compressor(residual_payload, level),
-    )
     encode_ms = (time.perf_counter() - start) * 1000.0
 
     sync_if_cuda(device)
     start = time.perf_counter()
-    header, compressed_payload = unpack_payload(encoded)
-    residual_payload = decompressor(compressed_payload)
-    if header.get("transform") == "zigzag+bitplane":
-        decoded_mapped = bitplane_bytes_to_uint16(residual_payload, header["shape"])
-        decoded_residual_array = zigzag_decode_uint16(decoded_mapped)
-    else:
-        decoded_residual_array = (
-            np.frombuffer(residual_payload, dtype=np.dtype(header["dtype"]))
-            .copy()
-            .reshape(header["shape"])
-        )
-    decoded_residuals = torch.from_numpy(decoded_residual_array).to(
-        device=device, dtype=torch.int32
-    )
     with torch.no_grad():
-        decoded_symbols = model._decode_symbols_from_residuals(  # noqa: SLF001
-            decoded_residuals,
-            prediction_mode=str(header.get("prediction_mode", "value")),
-        )
-        decoded = model._symbols_to_float(decoded_symbols)  # noqa: SLF001
+        # decoding must use the same public payload path as downstream users.
+        decoded = model.decompress(packed["strings"], packed["shape"])["x_hat"]
     sync_if_cuda(device)
     decode_ms = (time.perf_counter() - start) * 1000.0
 
     return summarize_roundtrip(
         codec=codec,
         x=x_target,
-        encoded=encoded,
+        encoded=packed["strings"],
         decoded=decoded.detach().cpu(),
         encode_ms=encode_ms,
         decode_ms=decode_ms,
@@ -749,6 +717,7 @@ def run_tcn_codec(
     sync_if_cuda(device)
     start = time.perf_counter()
     with torch.no_grad():
+        # this runs the model's own compress method as a reference implementation.
         packed = model.compress(x_device, valid_mask=mask_device)
     sync_if_cuda(device)
     encode_ms = (time.perf_counter() - start) * 1000.0
@@ -763,6 +732,7 @@ def run_tcn_codec(
     encoded_bytes = sum_string_bytes(packed["strings"])
     header = read_tcn_header(packed["strings"])
     codec_backend = str(header.get("codec_backend", "unknown")) if header else "unknown"
+    # summarize_roundtrip only needs encoded length, so a dummy byte string is enough here.
     fake_encoded = b"0" * encoded_bytes
     return summarize_roundtrip(
         codec="tcn_residual_zlib",
@@ -789,7 +759,9 @@ def evaluate_sample(
     x = sample["x"].unsqueeze(0).contiguous()
 
     reports: list[CodecResult] = []
+    # evaluate each requested codec independently on the same sample tensor.
     if "raw_zlib" in codecs:
+        # raw codecs compress float tensors directly and act as non-learned baselines.
         reports.append(
             run_raw_codec(
                 codec="raw_zlib",
@@ -826,6 +798,7 @@ def evaluate_sample(
                 )
             )
     if "symbols_zlib" in codecs:
+        # symbol codecs quantize to the configured integer grid before compression.
         reports.append(run_symbols_zlib(x, symbol_scale, zlib_level, original_bits_per_channel))
     if "symbols_zstd" in codecs:
         if zstd is None:
@@ -866,6 +839,7 @@ def evaluate_sample(
                 )
             )
     if "spectral_delta_zlib" in codecs:
+        # spectral delta codecs compress differences between adjacent bands.
         reports.append(
             run_spectral_delta_zlib(x, symbol_scale, zlib_level, original_bits_per_channel)
         )
@@ -908,6 +882,7 @@ def evaluate_sample(
                 )
             )
     if "tcn_residual_zlib" in codecs:
+        # tcn residual codecs compress prediction errors from the learned causal model.
         if tcn_model is None:
             reports.append(skipped("tcn_residual_zlib", "TCN model was not built"))
         else:
@@ -917,10 +892,9 @@ def evaluate_sample(
                     model=tcn_model,
                     x=x,
                     device=device,
-                    compressor=zlib_compress,
-                    decompressor=zlib_decompress,
                     level=zlib_level,
                     original_bits_per_channel=original_bits_per_channel,
+                    residual_backend="zlib",
                 )
             )
     if "tcn_residual_zstd" in codecs:
@@ -937,10 +911,9 @@ def evaluate_sample(
                     model=tcn_model,
                     x=x,
                     device=device,
-                    compressor=zstd_compress,
-                    decompressor=zstd_decompress,
                     level=zlib_level,
                     original_bits_per_channel=original_bits_per_channel,
+                    residual_backend="zstd",
                 )
             )
     if "bitplane_tcn_residual_zstd" in codecs:
@@ -960,11 +933,10 @@ def evaluate_sample(
                     model=tcn_model,
                     x=x,
                     device=device,
-                    compressor=zstd_compress,
-                    decompressor=zstd_decompress,
                     level=zlib_level,
                     original_bits_per_channel=original_bits_per_channel,
-                    bitplane=True,
+                    residual_backend="zstd",
+                    residual_transform="zigzag+bitplane",
                 )
             )
 
@@ -990,6 +962,7 @@ def summarize_reports(sample_reports: list[dict[str, Any]], original_bits: float
 
     summary = {}
     for codec, results in sorted(grouped.items()):
+        # skipped codecs are reported instead of silently disappearing from the summary.
         usable = [result for result in results if not result["skipped"]]
         skipped_count = len(results) - len(usable)
         if not usable:
@@ -1004,6 +977,7 @@ def summarize_reports(sample_reports: list[dict[str, Any]], original_bits: float
             continue
 
         total_bytes = sum(int(result["encoded_bytes"]) for result in usable)
+        # pooled bpppc is the fair aggregate because it weights by sample size.
         pooled_bpppc = (total_bytes * 8) / total_values_by_codec[codec]
         summary[codec] = {
             "num_samples": len(results),
@@ -1097,6 +1071,7 @@ def main() -> int:
         raise ValueError("--num-samples must be positive.")
 
     dataset, dataset_meta = build_eval_dataset(
+        # dataset source controls whether codecs see raw tif or normalized benchmark arrays.
         dataset_root=dataset_root,
         source=args.source,
         split=args.split,
@@ -1111,6 +1086,7 @@ def main() -> int:
     tcn_model = None
     checkpoint = args.checkpoint.expanduser().resolve() if args.checkpoint else None
     if TCN_CODECS & codecs:
+        # build the learned predictor only when a tcn codec was requested.
         tcn_model = build_tcn_model(config, in_channels, device, checkpoint)
 
     num_samples = min(args.num_samples, len(dataset))
@@ -1123,6 +1099,7 @@ def main() -> int:
 
     sample_reports = []
     for index in range(num_samples):
+        # each sample report keeps per-codec results so later summaries can be recomputed.
         sample_reports.append(
             evaluate_sample(
                 sample=dataset[index],
@@ -1157,6 +1134,7 @@ def main() -> int:
     out_json = args.save_json or (logs_dir() / "eval_lossless_codecs.json")
     out_csv = args.save_csv or (logs_dir() / "eval_lossless_codecs_summary.csv")
     out_json.parent.mkdir(parents=True, exist_ok=True)
+    # save both detailed json and compact csv because they serve different analysis needs.
     out_json.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     write_summary_csv(out_csv, summary)
 
