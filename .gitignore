@@ -16,5 +16,6 @@ build/
 wandb/
 configs/vms.yaml
 dataset/
+data/
 docs/
 summaries/

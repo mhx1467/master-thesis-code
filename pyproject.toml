@@ -28,6 +28,15 @@ mamba = [
 lossless = [
     "zstandard>=0.22.0",
 ]
+downstream = [
+    "joblib>=1.3",
+    "scikit-learn>=1.3",
+]
+downstream-boosting = [
+    "lightgbm>=4.0",
+    "catboost>=1.2",
+    "xgboost>=2.0",
+]
 dev = [
     "ruff>=0.2.1",
 ]

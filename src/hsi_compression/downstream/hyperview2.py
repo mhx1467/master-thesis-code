@@ -17,12 +17,17 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 HYPERVIEW2_TARGET_COLUMNS = ("B", "Cu", "Zn", "Fe", "S", "Mn")
+HYPERVIEW2_FEATURE_SETS = ("mean_std", "mean_std_derivatives", "full_stats")
+HYPERVIEW2_MODALITY_DIRS = {
+    "airborne": "hsi_airborne",
+    "prisma": "hsi_satellite",
+    "sentinel2": "msi_satellite",
+}
 EXPECTED_BANDS_BY_MODALITY = {
     "airborne": 430,
     "prisma": 230,
     "sentinel2": 13,
 }
-ARRAY_SUFFIXES = {".npy", ".npz", ".tif", ".tiff"}
 ID_COLUMN_CANDIDATES = (
     "id",
     "sample_index",
@@ -234,58 +239,6 @@ def _parse_float(value: Any) -> float:
     return float(text.replace(",", "."))
 
 
-def infer_split(path: Path) -> str:
-    # hyperview2 releases use several naming conventions, so infer split from path tokens
-    parts = {part.lower() for part in path.parts}
-    name = path.name.lower()
-    stem = path.stem.lower()
-    tokens = parts | {name, stem}
-    if tokens & {"train", "training"} or stem == "t" or stem.startswith("train"):
-        return "train"
-    if tokens & {"val", "valid", "validation"} or stem == "v" or stem.startswith(("val", "valid")):
-        return "validation"
-    if tokens & {"test", "testing", "psi", "ψ"} or stem.startswith("test"):
-        return "test"
-    return "unknown"
-
-
-def infer_modality(path: Path) -> str:
-    # modality inference keeps prisma, airborne, sentinel, and masks separated
-    text = path.as_posix().lower()
-    name = path.name.lower()
-    parts = {part.lower() for part in path.parts}
-    if "mask" in name:
-        return "mask"
-    if "prisma" in text or "hsi_satellite" in parts:
-        return "prisma"
-    if "sentinel" in text or "sentinel-2" in text or "s2" in parts or "msi_satellite" in parts:
-        return "sentinel2"
-    if "airborne" in text or "hsi_airborne" in parts or "hyspex" in text or "vs-725" in text:
-        return "airborne"
-    return "unknown"
-
-
-def find_label_csv(dataset_root: Path, target_columns: Sequence[str]) -> Path:
-    target_keys = {normalize_key(column) for column in target_columns}
-    candidates: list[tuple[int, Path]] = []
-    for path in dataset_root.rglob("*.csv"):
-        try:
-            with path.open(newline="", encoding="utf-8-sig") as handle:
-                reader = csv.DictReader(handle)
-                headers = {normalize_key(header) for header in (reader.fieldnames or [])}
-        except UnicodeDecodeError:
-            continue
-        overlap = len(target_keys & headers)
-        if overlap == len(target_keys):
-            # prefer train csv when several label tables contain the same targets.
-            candidates.append((0 if "train" in path.as_posix().lower() else 1, path))
-    if not candidates:
-        raise FileNotFoundError(
-            f"Could not find a CSV containing all target columns: {tuple(target_columns)}"
-        )
-    return sorted(candidates)[0][1]
-
-
 def _resolve_columns(
     headers: Sequence[str],
     target_columns: Sequence[str],
@@ -341,118 +294,88 @@ def _read_label_rows(
     return rows
 
 
-def _clean_identifier(value: str) -> str:
-    # remove modality and file-type words so image files and label rows match by core id.
-    text = Path(value).stem if any(sep in value for sep in ("/", "\\")) else value
-    text = normalize_key(text)
-    for token in (
-        "spectralimage",
-        "spectral",
-        "image",
-        "prisma",
-        "sentinel2",
-        "sentinel",
-        "airborne",
-        "hyspex",
-        "hsi",
-        "msi",
-        "satellite",
-        "mask",
-        "data",
-        "gt",
-        "label",
-        "labels",
-    ):
-        text = text.replace(token, "")
-    return text
+def resolve_hyperview2_root(dataset_root: str | Path) -> Path:
+    root = Path(dataset_root).expanduser().resolve()
+    if (root / "train_gt.csv").is_file() and (root / "train").is_dir():
+        return root
+    nested = root / "HYPERVIEW2"
+    if (nested / "train_gt.csv").is_file() and (nested / "train").is_dir():
+        return nested
+    raise FileNotFoundError(
+        "Expected HYPERVIEW2 root with train_gt.csv and train/. "
+        f"Checked: {root} and {nested}"
+    )
 
 
-def _canonical_identifier(value: str) -> str:
-    cleaned = _clean_identifier(value)
-    if cleaned.isdigit():
-        return str(int(cleaned))
-    return cleaned
+def _canonical_sample_id(raw_id: str) -> str:
+    text = str(raw_id).strip()
+    if not text:
+        raise ValueError("Empty HYPERVIEW2 sample id")
+    if text.isdigit():
+        return str(int(text))
+    return Path(text).stem
 
 
-def _identifier_aliases(value: str) -> set[str]:
-    cleaned = _clean_identifier(value)
-    aliases = {cleaned, _canonical_identifier(value)}
-    return {alias for alias in aliases if alias}
+def _array_stem_candidates(raw_id: str) -> list[str]:
+    sample_id = _canonical_sample_id(raw_id)
+    stems = [sample_id]
+    if sample_id.isdigit():
+        stems.insert(0, f"{int(sample_id):04d}")
+    return list(dict.fromkeys(stems))
 
 
-def _path_id_candidates(path: Path) -> set[str]:
-    candidates = set()
-    for value in (path.stem, path.parent.name, f"{path.parent.name}_{path.stem}"):
-        candidates.update(_identifier_aliases(value))
-    return {candidate for candidate in candidates if candidate}
-
-
-def _index_paths(dataset_root: Path, modality: str, split: str | None = None) -> dict[str, Path]:
-    buckets: dict[str, list[Path]] = {}
-    for path in dataset_root.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in ARRAY_SUFFIXES:
-            continue
-        if split is not None and infer_split(path) != split:
-            continue
-        inferred = infer_modality(path)
-        if modality != "any" and inferred != modality:
-            continue
-        for candidate in _path_id_candidates(path):
-            # one file can have several useful aliases depending on naming convention.
-            buckets.setdefault(candidate, []).append(path)
-
-    index = {}
-    for key, paths in buckets.items():
-        # shortest path is preferred to avoid selecting derived or deeply nested duplicates.
-        unique = sorted(set(paths), key=lambda item: (len(item.as_posix()), item.as_posix()))
-        if unique:
-            index[key] = unique[0]
-    return index
+def _resolve_hyperview2_array_path(array_dir: Path, raw_id: str) -> Path:
+    for stem in _array_stem_candidates(raw_id):
+        for suffix in (".npz", ".npy", ".tif", ".tiff"):
+            path = array_dir / f"{stem}{suffix}"
+            if path.is_file():
+                return path
+    checked = ", ".join(str(array_dir / f"{stem}.npz") for stem in _array_stem_candidates(raw_id))
+    raise FileNotFoundError(f"Could not find HYPERVIEW2 array for id {raw_id!r}. Checked: {checked}")
 
 
 def build_hyperview2_samples(
     dataset_root: str | Path,
     modality: str = "prisma",
+    split: str = "train",
     labels_csv: str | Path | None = None,
     id_column: str | None = None,
     target_columns: Sequence[str] = HYPERVIEW2_TARGET_COLUMNS,
     max_samples: int | None = None,
 ) -> list[Hyperview2Sample]:
-    root = Path(dataset_root).expanduser().resolve()
-    if not root.exists():
-        raise FileNotFoundError(f"HYPERVIEW2 dataset root does not exist: {root}")
-    if modality not in {"prisma", "sentinel2", "airborne", "any"}:
-        raise ValueError("modality must be one of: prisma, sentinel2, airborne, any")
+    root = resolve_hyperview2_root(dataset_root)
+    if modality not in HYPERVIEW2_MODALITY_DIRS:
+        raise ValueError(f"modality must be one of: {', '.join(HYPERVIEW2_MODALITY_DIRS)}")
+    if split not in {"train", "test"}:
+        raise ValueError("split must be one of: train, test")
 
     label_path = (
         Path(labels_csv).expanduser().resolve()
         if labels_csv
-        else find_label_csv(root, target_columns)
+        else root / "train_gt.csv"
     )
+    if not label_path.is_file():
+        raise FileNotFoundError(f"HYPERVIEW2 labels CSV does not exist: {label_path}")
+    array_dir = root / split / HYPERVIEW2_MODALITY_DIRS[modality]
+    if not array_dir.is_dir():
+        raise FileNotFoundError(f"HYPERVIEW2 array directory does not exist: {array_dir}")
+
     label_rows = _read_label_rows(label_path, target_columns, id_column)
-    label_split = infer_split(label_path)
-    array_split = None if label_split == "unknown" else label_split
-    # index image arrays and masks separately because masks are optional.
-    array_index = _index_paths(root, modality, split=array_split)
-    mask_index = _index_paths(root, "mask", split=array_split)
 
     samples = []
     missing = []
     for raw_id, target in label_rows:
-        key = _canonical_identifier(raw_id)
-        # try all aliases of the label id until an image file is found.
-        path = next(
-            (array_index[alias] for alias in _identifier_aliases(raw_id) if alias in array_index),
-            None,
-        )
-        if path is None:
+        key = _canonical_sample_id(raw_id)
+        try:
+            path = _resolve_hyperview2_array_path(array_dir, raw_id)
+        except FileNotFoundError:
             missing.append(raw_id)
             continue
         samples.append(
             Hyperview2Sample(
                 sample_id=key,
                 array_path=path,
-                mask_path=mask_index.get(key),
+                mask_path=path if path.suffix.lower() == ".npz" else None,
                 target=target,
             )
         )
@@ -462,7 +385,7 @@ def build_hyperview2_samples(
     if not samples:
         preview = ", ".join(missing[:8])
         raise ValueError(
-            f"No labeled {modality} samples could be paired with image arrays. "
+            f"No labeled {modality} samples could be paired with {split} image arrays. "
             f"Missing examples: {preview}"
         )
     return sorted(samples, key=lambda sample: sample.sample_id)
@@ -525,9 +448,16 @@ def to_chw(array: np.ndarray, expected_bands: int | None = None) -> np.ndarray:
 def load_mask(path: str | Path | None, shape_hw: tuple[int, int]) -> np.ndarray | None:
     if path is None:
         return None
-    mask = np.asarray(
-        tifffile.imread(path) if Path(path).suffix.lower() in {".tif", ".tiff"} else np.load(path)
-    )
+    path = Path(path)
+    if path.suffix.lower() in {".tif", ".tiff"}:
+        mask = np.asarray(tifffile.imread(path))
+    elif path.suffix.lower() == ".npz":
+        with np.load(path) as archive:
+            if "mask" not in archive.files:
+                return None
+            mask = np.asarray(archive["mask"])
+    else:
+        mask = np.asarray(np.load(path))
     mask = np.squeeze(mask)
     if mask.ndim == 3:
         # collapse mask cubes to one spatial mask when needed.
@@ -535,6 +465,8 @@ def load_mask(path: str | Path | None, shape_hw: tuple[int, int]) -> np.ndarray 
             mask = mask[0]
         elif mask.shape[-1] == 1:
             mask = mask[..., 0]
+        elif tuple(mask.shape[-2:]) == tuple(shape_hw):
+            mask = mask.max(axis=0)
         else:
             mask = mask.max(axis=0) if mask.shape[0] <= mask.shape[-1] else mask.max(axis=-1)
     if tuple(mask.shape) != tuple(shape_hw):
@@ -579,22 +511,81 @@ def extract_spectral_stats(
     mask: np.ndarray | None = None,
     normalization: str = "percentile",
 ) -> np.ndarray:
-    cube = normalize_cube(cube, mask=mask, mode=normalization)
+    return extract_spectral_features(
+        cube,
+        mask=mask,
+        normalization=normalization,
+        feature_set="mean_std",
+    )
+
+
+def _valid_flat_pixels(cube: np.ndarray, mask: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
     c, h, w = cube.shape
     flat = cube.reshape(c, h * w)
-    # valid pixels are the only ones used for spectral statistics.
     valid = mask.reshape(h * w).astype(bool) if mask is not None else np.isfinite(flat).all(axis=0)
+    return flat, valid
+
+
+def _band_stat(values: np.ndarray, channels: int, statistic: str) -> np.ndarray:
+    if values.size == 0:
+        return np.zeros(channels, dtype=np.float32)
+    if statistic == "mean":
+        return values.mean(axis=1).astype(np.float32)
+    if statistic == "std":
+        return values.std(axis=1).astype(np.float32)
+    if statistic == "min":
+        return values.min(axis=1).astype(np.float32)
+    if statistic == "max":
+        return values.max(axis=1).astype(np.float32)
+    if statistic == "median":
+        return np.median(values, axis=1).astype(np.float32)
+    if statistic == "q25":
+        return np.percentile(values, 25.0, axis=1).astype(np.float32)
+    if statistic == "q75":
+        return np.percentile(values, 75.0, axis=1).astype(np.float32)
+    raise ValueError(f"Unsupported band statistic: {statistic}")
+
+
+def _spectral_gradient(values: np.ndarray) -> np.ndarray:
+    if values.shape[0] <= 1:
+        return np.zeros_like(values, dtype=np.float32)
+    return np.gradient(values.astype(np.float32)).astype(np.float32)
+
+
+def extract_spectral_features(
+    cube: np.ndarray,
+    mask: np.ndarray | None = None,
+    normalization: str = "percentile",
+    feature_set: str = "mean_std",
+) -> np.ndarray:
+    if feature_set not in HYPERVIEW2_FEATURE_SETS:
+        raise ValueError(f"feature_set must be one of: {', '.join(HYPERVIEW2_FEATURE_SETS)}")
+    cube = normalize_cube(cube, mask=mask, mode=normalization)
+    c, _, _ = cube.shape
+    flat, valid = _valid_flat_pixels(cube, mask)
+    # valid pixels are the only ones used for spectral statistics.
     valid_fraction = float(valid.mean()) if valid.size else 0.0
-    if not valid.any():
-        mean = np.zeros(c, dtype=np.float32)
-        std = np.zeros(c, dtype=np.float32)
-    else:
-        valid_values = flat[:, valid]
-        mean = valid_values.mean(axis=1).astype(np.float32)
-        std = valid_values.std(axis=1).astype(np.float32)
-    return np.concatenate([mean, std, np.asarray([valid_fraction], dtype=np.float32)]).astype(
-        np.float32
-    )
+    valid_values = flat[:, valid] if valid.any() else np.empty((c, 0), dtype=np.float32)
+    mean = _band_stat(valid_values, channels=c, statistic="mean")
+    std = _band_stat(valid_values, channels=c, statistic="std")
+    features = [mean, std]
+
+    if feature_set in {"mean_std_derivatives", "full_stats"}:
+        features.extend([_spectral_gradient(mean), _spectral_gradient(std)])
+
+    if feature_set == "full_stats":
+        features.extend(
+            [
+                _band_stat(valid_values, channels=c, statistic="min"),
+                _band_stat(valid_values, channels=c, statistic="max"),
+                _band_stat(valid_values, channels=c, statistic="median"),
+                _band_stat(valid_values, channels=c, statistic="q25"),
+                _band_stat(valid_values, channels=c, statistic="q75"),
+            ]
+        )
+
+    features.append(np.asarray([valid_fraction], dtype=np.float32))
+    return np.concatenate(features).astype(np.float32)
 
 
 class Hyperview2FeatureDataset(Dataset):
@@ -603,12 +594,16 @@ class Hyperview2FeatureDataset(Dataset):
         samples: Sequence[Hyperview2Sample],
         modality: str = "prisma",
         normalization: str = "percentile",
+        feature_set: str = "mean_std",
     ):
         if not samples:
             raise ValueError("Empty Hyperview2FeatureDataset")
+        if feature_set not in HYPERVIEW2_FEATURE_SETS:
+            raise ValueError(f"feature_set must be one of: {', '.join(HYPERVIEW2_FEATURE_SETS)}")
         self.samples = list(samples)
         self.modality = modality
         self.normalization = normalization
+        self.feature_set = feature_set
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -618,7 +613,12 @@ class Hyperview2FeatureDataset(Dataset):
         cube = load_array(sample.array_path, modality=self.modality)
         mask = load_mask(sample.mask_path, shape_hw=tuple(cube.shape[-2:]))
         # feature baseline uses simple mean and std per band instead of all pixels.
-        features = extract_spectral_stats(cube, mask=mask, normalization=self.normalization)
+        features = extract_spectral_features(
+            cube,
+            mask=mask,
+            normalization=self.normalization,
+            feature_set=self.feature_set,
+        )
         return {
             "features": torch.from_numpy(features),
             "target": torch.from_numpy(sample.target.astype(np.float32)),

@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from hsi_compression.downstream import (
+    HYPERVIEW2_FEATURE_SETS,
     HYPERVIEW2_TARGET_COLUMNS,
     Hyperview2CompressionDataset,
     Hyperview2FeatureDataset,
@@ -15,9 +16,11 @@ from hsi_compression.downstream import (
     collate_compression_batch,
     collate_pixel_set_batch,
     compute_regression_metrics,
+    extract_spectral_features,
     hyperview_score,
 )
 from hsi_compression.downstream.hyperview2 import to_chw
+from hsi_compression.downstream.hyperview2_regressors import available_regressor_names
 
 
 def _write_labels(path, rows):
@@ -29,21 +32,20 @@ def _write_labels(path, rows):
 
 def test_build_hyperview2_samples_pairs_labels_with_prisma_arrays(tmp_path):
     root = tmp_path / "hyperview2"
-    (root / "train" / "prisma").mkdir(parents=True)
-    # synthetic files cover both channel-first and channel-last prisma arrays.
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
     _write_labels(
-        root / "train.csv",
+        root / "train_gt.csv",
         [
-            ["sample001", 1, 2, 3, 4, 5, 6],
-            ["sample002", 2, 3, 4, 5, 6, 7],
+            [1, 1, 2, 3, 4, 5, 6],
+            [2, 2, 3, 4, 5, 6, 7],
         ],
     )
-    np.save(root / "train" / "prisma" / "sample001_prisma.npy", np.ones((230, 2, 3)))
-    np.save(root / "train" / "prisma" / "sample002_prisma.npy", np.ones((2, 3, 230)))
+    np.savez(root / "train" / "hsi_satellite" / "0001.npz", data=np.ones((230, 2, 3)))
+    np.savez(root / "train" / "hsi_satellite" / "0002.npz", data=np.ones((2, 3, 230)))
 
     samples = build_hyperview2_samples(root, modality="prisma")
 
-    assert [sample.sample_id for sample in samples] == ["sample001", "sample002"]
+    assert [sample.sample_id for sample in samples] == ["1", "2"]
     assert samples[0].target.tolist() == [1, 2, 3, 4, 5, 6]
 
 
@@ -83,11 +85,11 @@ def test_build_hyperview2_samples_pairs_official_numeric_layout(tmp_path):
 
 def test_hyperview2_feature_dataset_returns_fixed_spectral_stats(tmp_path):
     root = tmp_path / "hyperview2"
-    (root / "train" / "prisma").mkdir(parents=True)
-    _write_labels(root / "train.csv", [["sample001", 1, 2, 3, 4, 5, 6]])
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
+    _write_labels(root / "train_gt.csv", [[1, 1, 2, 3, 4, 5, 6]])
     cube = np.zeros((230, 2, 2), dtype=np.float32)
     cube[:, 0, 0] = 1.0
-    np.save(root / "train" / "prisma" / "sample001_prisma.npy", cube)
+    np.savez(root / "train" / "hsi_satellite" / "0001.npz", data=cube)
 
     samples = build_hyperview2_samples(root, modality="prisma")
     dataset = Hyperview2FeatureDataset(samples, modality="prisma", normalization="none")
@@ -98,13 +100,48 @@ def test_hyperview2_feature_dataset_returns_fixed_spectral_stats(tmp_path):
     assert item["features"][-1].item() == pytest.approx(1.0)
 
 
+def test_hyperview2_feature_dataset_supports_larger_feature_sets(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
+    _write_labels(root / "train_gt.csv", [[1, 1, 2, 3, 4, 5, 6]])
+    cube = np.ones((230, 2, 2), dtype=np.float32)
+    np.savez(root / "train" / "hsi_satellite" / "0001.npz", data=cube)
+
+    samples = build_hyperview2_samples(root, modality="prisma")
+    lengths = []
+    for feature_set in HYPERVIEW2_FEATURE_SETS:
+        dataset = Hyperview2FeatureDataset(
+            samples,
+            modality="prisma",
+            normalization="none",
+            feature_set=feature_set,
+        )
+        lengths.append(dataset[0]["features"].shape[0])
+
+    assert lengths == [2 * 230 + 1, 4 * 230 + 1, 9 * 230 + 1]
+
+
+def test_extract_spectral_features_rejects_unknown_feature_set():
+    cube = np.ones((230, 2, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="feature_set"):
+        extract_spectral_features(cube, feature_set="unknown")
+
+
+def test_available_regressor_names_can_report_optional_models():
+    names = available_regressor_names(include_unavailable=True)
+
+    assert "extra_trees" in names
+    assert "lightgbm" in names
+
+
 def test_hyperview2_pixel_set_dataset_returns_pixel_spectra(tmp_path):
     root = tmp_path / "hyperview2"
-    (root / "train" / "prisma").mkdir(parents=True)
-    _write_labels(root / "train.csv", [["sample001", 1, 2, 3, 4, 5, 6]])
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
+    _write_labels(root / "train_gt.csv", [[1, 1, 2, 3, 4, 5, 6]])
     cube = np.zeros((230, 1, 2), dtype=np.float32)
     cube[:, 0, 0] = 1.0
-    np.save(root / "train" / "prisma" / "sample001_prisma.npy", cube)
+    np.savez(root / "train" / "hsi_satellite" / "0001.npz", data=cube)
 
     samples = build_hyperview2_samples(root, modality="prisma")
     dataset = Hyperview2PixelSetDataset(samples, modality="prisma", normalization="none")
@@ -117,16 +154,16 @@ def test_hyperview2_pixel_set_dataset_returns_pixel_spectra(tmp_path):
 
 def test_hyperview2_compression_dataset_and_collate_pad_spatial(tmp_path):
     root = tmp_path / "hyperview2"
-    (root / "train" / "prisma").mkdir(parents=True)
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
     _write_labels(
-        root / "train.csv",
+        root / "train_gt.csv",
         [
-            ["sample001", 1, 2, 3, 4, 5, 6],
-            ["sample002", 2, 3, 4, 5, 6, 7],
+            [1, 1, 2, 3, 4, 5, 6],
+            [2, 2, 3, 4, 5, 6, 7],
         ],
     )
-    np.save(root / "train" / "prisma" / "sample001_prisma.npy", np.ones((230, 1, 2)))
-    np.save(root / "train" / "prisma" / "sample002_prisma.npy", np.ones((230, 2, 3)))
+    np.savez(root / "train" / "hsi_satellite" / "0001.npz", data=np.ones((230, 1, 2)))
+    np.savez(root / "train" / "hsi_satellite" / "0002.npz", data=np.ones((230, 2, 3)))
 
     samples = build_hyperview2_samples(root, modality="prisma")
     dataset = Hyperview2CompressionDataset(samples, modality="prisma", normalization="none")
@@ -139,6 +176,23 @@ def test_hyperview2_compression_dataset_and_collate_pad_spatial(tmp_path):
     assert batch["valid_mask"][0, :, :1, :2].all()
     assert not batch["valid_mask"][0, :, 1:, :].any()
     assert batch["original_shape"] == [(230, 1, 2), (230, 2, 3)]
+
+
+def test_hyperview2_compression_dataset_uses_npz_mask(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
+    _write_labels(root / "train_gt.csv", [[1, 1, 2, 3, 4, 5, 6]])
+    cube = np.ones((230, 2, 2), dtype=np.float32)
+    mask = np.ones((230, 2, 2), dtype=bool)
+    mask[:, 1, 1] = False
+    np.savez(root / "train" / "hsi_satellite" / "0001.npz", data=cube, mask=mask)
+
+    samples = build_hyperview2_samples(root, modality="prisma")
+    item = Hyperview2CompressionDataset(samples, modality="prisma", normalization="none")[0]
+
+    assert item["valid_mask"].shape == (230, 2, 2)
+    assert item["valid_mask"][:, 0, 0].all()
+    assert not item["valid_mask"][:, 1, 1].any()
 
 
 def test_collate_pixel_set_batch_pads_variable_pixel_counts():
