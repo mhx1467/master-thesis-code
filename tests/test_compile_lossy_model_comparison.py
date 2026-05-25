@@ -124,6 +124,58 @@ def test_eval_command_is_generated_only_for_needs_eval_entries() -> None:
     assert "--run-name lossy_compare_baseline_2d_patch_lic_recon_easy_test" in command
 
 
+def test_completed_needs_eval_row_is_reference_comparable(tmp_path: Path) -> None:
+    eval_path = tmp_path / "baseline_eval.json"
+    eval_path.write_text(
+        json.dumps(
+            {
+                "model_name": "baseline_3d_patch_ae",
+                "split": "test",
+                "difficulty": "easy",
+                "num_samples": 1149,
+                "num_input_bands": 202,
+                "num_params": 217601,
+                "psnr": 45.3,
+                "ssim": 0.982,
+                "sa_deg": 3.0,
+                "likelihood_bpppc": 1.50,
+                "actual_bpppc": 1.51,
+                "actual_compression_ratio": 10.6,
+                "actual_psnr": 45.4,
+                "actual_ssim": 0.981,
+                "actual_sa_deg": 2.98,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    row = comparison._row_from_entry(
+        {
+            "slug": "baseline_3d_patch_recon",
+            "label": "3D patch baseline",
+            "family": "active_baseline",
+            "status": "needs_eval",
+            "eval_json": str(eval_path),
+        },
+        {"expected_num_samples": 1149, "expected_num_input_bands": 202},
+    )
+
+    assert comparison._is_reference_comparable_result(row)
+
+    summary_path = tmp_path / "summary.md"
+    comparison._write_summary(
+        summary_path,
+        {"dataset_protocol": "HySpecNet-11k easy test split"},
+        rows=[row],
+        gap_rows=[],
+        eval_commands=[],
+    )
+
+    text = summary_path.read_text(encoding="utf-8")
+    assert "| 3D patch baseline | active_baseline | 45.4000 | 0.9810 | 2.9800 |" in text
+    assert "| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |" not in text
+
+
 def test_summary_prefers_decoded_actual_metrics(tmp_path: Path) -> None:
     summary_path = tmp_path / "summary.md"
     row = dict.fromkeys(comparison.FIELDNAMES) | {

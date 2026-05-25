@@ -36,6 +36,8 @@ FIELDNAMES = [
     "notes",
 ]
 
+REFERENCE_RESULT_STATUSES = {"reference_comparable", "needs_eval"}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -271,6 +273,14 @@ def _has_any_metric(row: dict[str, Any]) -> bool:
     return any(row.get(key) is not None for key in metric_keys)
 
 
+def _is_reference_comparable_result(row: dict[str, Any]) -> bool:
+    return (
+        row.get("status") in REFERENCE_RESULT_STATUSES
+        and _as_float(row.get("actual_bpppc")) is not None
+        and not row.get("protocol_warnings")
+    )
+
+
 def _decoded_metric(row: dict[str, Any], actual_key: str, forward_key: str) -> Any:
     return _first_value(row.get(actual_key), row.get(forward_key))
 
@@ -295,14 +305,14 @@ def _write_summary(
     reference_rows = [
         row
         for row in rows
-        if row["status"] == "reference_comparable" and _as_float(row["actual_bpppc"]) is not None
+        if _is_reference_comparable_result(row)
     ]
     reference_rows = sorted(
         reference_rows,
         key=lambda row: (_first_float(row["actual_bpppc"], 1e9) or 1e9, row["label"]),
     )
     nonreference_metric_rows = [
-        row for row in rows if row["status"] != "reference_comparable" and _has_any_metric(row)
+        row for row in rows if not _is_reference_comparable_result(row) and _has_any_metric(row)
     ]
 
     lines = [
@@ -397,7 +407,7 @@ def main() -> None:
     gap_rows = [
         row
         for row in rows
-        if row["status"] != "reference_comparable" or _as_float(row["actual_bpppc"]) is None
+        if not _is_reference_comparable_result(row)
     ]
 
     output_dir = Path(args.output_dir)
@@ -416,7 +426,7 @@ def main() -> None:
 
     eval_commands = []
     for entry, row in zip(entries, rows, strict=True):
-        if row["status"] == "reference_comparable" and _as_float(row["actual_bpppc"]) is not None:
+        if _is_reference_comparable_result(row):
             continue
         command = _eval_command(
             entry=entry,
