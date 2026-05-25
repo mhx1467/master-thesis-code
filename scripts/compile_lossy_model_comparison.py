@@ -281,6 +281,10 @@ def _is_reference_comparable_result(row: dict[str, Any]) -> bool:
     )
 
 
+def _reference_comparable_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if _is_reference_comparable_result(row)]
+
+
 def _decoded_metric(row: dict[str, Any], actual_key: str, forward_key: str) -> Any:
     return _first_value(row.get(actual_key), row.get(forward_key))
 
@@ -302,11 +306,7 @@ def _write_summary(
     gap_rows: list[dict[str, Any]],
     eval_commands: list[str],
 ) -> None:
-    reference_rows = [
-        row
-        for row in rows
-        if _is_reference_comparable_result(row)
-    ]
+    reference_rows = _reference_comparable_rows(rows)
     reference_rows = sorted(
         reference_rows,
         key=lambda row: (_first_float(row["actual_bpppc"], 1e9) or 1e9, row["label"]),
@@ -415,12 +415,7 @@ def main() -> None:
     _write_csv(output_dir / "comparison_all.csv", rows)
     _write_csv(
         output_dir / "comparison_reference_comparable.csv",
-        [
-            row
-            for row in rows
-            if row["status"] == "reference_comparable"
-            and _as_float(row["actual_bpppc"]) is not None
-        ],
+        _reference_comparable_rows(rows),
     )
     _write_csv(output_dir / "comparison_gaps.csv", gap_rows)
 

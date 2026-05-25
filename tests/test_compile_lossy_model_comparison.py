@@ -161,6 +161,7 @@ def test_completed_needs_eval_row_is_reference_comparable(tmp_path: Path) -> Non
     )
 
     assert comparison._is_reference_comparable_result(row)
+    assert comparison._reference_comparable_rows([row]) == [row]
 
     summary_path = tmp_path / "summary.md"
     comparison._write_summary(
