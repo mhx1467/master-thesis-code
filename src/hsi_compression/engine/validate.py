@@ -45,6 +45,14 @@ def _supports_actual_compression(model) -> bool:
     return bool(getattr(model_raw, "supports_actual_compression", False))
 
 
+def _exact_reconstruction_target(model, x: torch.Tensor) -> torch.Tensor:
+    model_raw = model.module if hasattr(model, "module") else model
+    target_fn = getattr(model_raw, "exact_reconstruction_target", None)
+    if callable(target_fn):
+        return target_fn(x)
+    return x
+
+
 @torch.no_grad()
 def validate_one_epoch(
     model,
@@ -228,10 +236,11 @@ def validate_one_epoch(
                 raise RuntimeError("model.decompress() must return a dict containing 'x_hat'")
 
             x_hat_actual = decoded["x_hat"].to(device=device, dtype=x.dtype)
-            actual_mismatch_count += int((x_hat_actual != x).sum().item())
+            exact_target = _exact_reconstruction_target(model, x).to(device=device, dtype=x.dtype)
+            actual_mismatch_count += int((x_hat_actual != exact_target).sum().item())
             actual_max_abs_error = max(
                 actual_max_abs_error,
-                float((x_hat_actual - x).abs().max().item()),
+                float((x_hat_actual - exact_target).abs().max().item()),
             )
             totals["actual_bpppc"] += compute_actual_bpppc_from_strings(
                 packed["strings"], tuple(x.shape)

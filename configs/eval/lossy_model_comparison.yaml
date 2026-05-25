@@ -1,0 +1,140 @@
+protocol:
+  name: hyspecnet11k_easy_test_lossy_model_comparison
+  dataset_protocol: HySpecNet-11k easy test split
+  dataset_source: benchmark DATA.npy
+  split: test
+  difficulty: easy
+  drop_invalid_channels: true
+  expected_num_input_bands: 202
+  expected_num_samples: 1149
+  metric_policy: actual_bpppc is the primary measured bitrate; likelihood_bpppc is diagnostic.
+
+models:
+  - slug: baseline_1d_pixel_recon
+    label: 1D pixel baseline
+    family: active_baseline
+    status: needs_training_or_checkpoint
+    checkpoint: artifacts/checkpoints/internal_baseline_1d_pixel_ae_latent16_best.pt
+    notes: Active registry baseline, but no matching remote checkpoint was found in the current artifact snapshot.
+
+  - slug: baseline_2d_patch_lic_recon
+    label: 2D patch LIC baseline
+    family: active_baseline
+    status: needs_eval
+    checkpoint: artifacts/checkpoints/internal_baseline_2d_patch_ae_lic_recon_latent16_best.pt
+    eval_json: artifacts/logs/lossy_compare_baseline_2d_patch_lic_recon_easy_test.json
+    notes: Active 202-band checkpoint exists on remote; run evaluation to get test actual_bpppc.
+
+  - slug: baseline_3d_patch_recon
+    label: 3D patch baseline
+    family: active_baseline
+    status: needs_eval
+    checkpoint: artifacts/checkpoints/internal_baseline_3d_patch_ae_recon_latent16_best.pt
+    eval_json: artifacts/logs/lossy_compare_baseline_3d_patch_recon_easy_test.json
+    notes: Active 202-band checkpoint exists on remote; run evaluation to get test actual_bpppc.
+
+  - slug: baseline_3d_patch_rd_0_01
+    label: 3D patch RD baseline
+    family: active_baseline
+    status: needs_eval
+    checkpoint: artifacts/checkpoints/internal_baseline_3d_patch_ae_latent16_best.pt
+    eval_json: artifacts/logs/lossy_compare_baseline_3d_patch_rd_0_01_easy_test.json
+    notes: Active 202-band RD checkpoint exists on remote, but validation quality was weak; still useful as an RD baseline.
+
+  - slug: hybrid_2d3d_lic_recon
+    label: Hybrid 2D/3D LIC baseline
+    family: active_baseline
+    status: needs_training_or_checkpoint
+    checkpoint: artifacts/checkpoints/internal_hybrid_2d3d_ae_lic_recon_latent16_best.pt
+    notes: Config exists, but no matching remote checkpoint was found in the current artifact snapshot.
+
+  - slug: spectral_mamba_recon_legacy
+    label: Legacy spectral-first Mamba baseline
+    family: mamba_baseline
+    status: legacy_not_reference_comparable
+    checkpoint: artifacts/checkpoints/paper_spectral_first_mamba_ae_latent96_best.pt
+    legacy_eval_json: artifacts/logs/eval_spectral_first_mamba_ae_easy_test.json
+    notes: Legacy eval used an older 180-band path and the checkpoint config uses a legacy registry ID; retrain or migrate under active spectral_mamba_ae before reference comparison.
+
+  - slug: hierarchical_mamba_k4_mse
+    label: Hierarchical Mamba K4 MSE
+    family: mamba
+    status: reference_comparable
+    checkpoint: artifacts/checkpoints/hierarchical_spectral_mamba_ae_recon_latent96_best.pt
+    eval_json: artifacts/analysis/hierarchical_mamba_rd_20260509/eval_json/k4_spatial_mse_pretrain.json
+    notes: Full easy-test measured bitstream result from archived W&B eval summary.
+
+  - slug: hierarchical_mamba_k4_rd_0_0001
+    label: Hierarchical Mamba K4 RD 1e-4
+    family: mamba
+    status: reference_comparable
+    checkpoint: artifacts/checkpoints/hierarchical_spectral_mamba_ae_k4_spatial_rd_lambda_0_01_best.pt
+    eval_json: artifacts/analysis/hierarchical_mamba_rd_20260509/eval_json/k4_spatial_rd_lambda_0_0001.json
+    notes: Full easy-test measured bitstream result from archived W&B eval summary.
+
+  - slug: hierarchical_mamba_k1_rd_0_0003
+    label: Hierarchical Mamba K1 RD 3e-4
+    family: mamba
+    status: reference_comparable
+    checkpoint: artifacts/checkpoints/hierarchical_spectral_mamba_ae_k1_spatial_rd_lambda_0_0003_best.pt
+    eval_json: artifacts/analysis/hierarchical_mamba_rd_20260509/eval_json/k1_spatial_rd_lambda_0_0003.json
+    notes: K is num_summary_tokens, not spectral group size.
+
+  - slug: hierarchical_mamba_k4_rd_0_0003
+    label: Hierarchical Mamba K4 RD 3e-4
+    family: mamba
+    status: reference_comparable
+    checkpoint: artifacts/checkpoints/hierarchical_spectral_mamba_ae_k4_spatial_rd_lambda_0_01_best.pt
+    eval_json: artifacts/analysis/hierarchical_mamba_rd_20260509/eval_json/k4_spatial_rd_lambda_0_0003.json
+    notes: Main recommended K4 RD point.
+
+  - slug: hierarchical_mamba_k4_rd_0_0005
+    label: Hierarchical Mamba K4 RD 5e-4
+    family: mamba
+    status: reference_comparable
+    checkpoint: artifacts/checkpoints/hierarchical_spectral_mamba_ae_k4_spatial_rd_lambda_0_0005_best.pt
+    eval_json: artifacts/analysis/hierarchical_mamba_rd_20260509/eval_json/k4_spatial_rd_lambda_0_0005.json
+    notes: Higher-compression K4 RD point.
+
+  - slug: hierarchical_mamba_k4_no_spatial_rd_0_0003
+    label: Hierarchical Mamba K4 no spatial RD 3e-4
+    family: mamba_ablation
+    status: reference_comparable
+    checkpoint: artifacts/checkpoints/hierarchical_spectral_mamba_ae_k4_no_spatial_rd_lambda_0_0003_best.pt
+    eval_json: artifacts/analysis/hierarchical_mamba_rd_20260509/eval_json/k4_no_spatial_rd_lambda_0_0003.json
+    notes: Spatial-conditioning ablation at the same RD point.
+
+  - slug: hierarchical_mamba_hyperprior_k4_rd_0_01
+    label: Hierarchical Mamba K4 hyperprior RD 1e-2
+    family: mamba
+    status: needs_training_or_checkpoint
+    checkpoint: artifacts/checkpoints/hierarchical_spectral_mamba_hyperprior_k4_spatial_rd_lambda_0_01_best.pt
+    notes: Active model and config exist, but no comparable checkpoint/evaluation is available yet.
+
+  - slug: legacy_baseline_1d_ae_v2
+    label: Legacy 1D AE v2
+    family: legacy_baseline
+    status: legacy_not_reference_comparable
+    legacy_eval_json: artifacts/logs/eval_baseline_1d_ae_v2_easy_test.json
+    notes: Older 180-band eval; keep out of reference RD claims.
+
+  - slug: legacy_baseline_2d_ae
+    label: Legacy 2D AE
+    family: legacy_baseline
+    status: legacy_not_reference_comparable
+    legacy_eval_json: artifacts/logs/eval_baseline_2d_ae_easy_test.json
+    notes: Older legacy/source eval with no measured actual_bpppc; keep out of reference RD claims.
+
+  - slug: legacy_baseline_3d_ae
+    label: Legacy 3D AE
+    family: legacy_baseline
+    status: legacy_not_reference_comparable
+    legacy_eval_json: artifacts/logs/eval_baseline_3d_ae_easy_test.json
+    notes: Older 180-band eval; keep out of reference RD claims.
+
+  - slug: legacy_baseline_3d_fullbands_ae
+    label: Legacy 3D fullbands AE
+    family: legacy_baseline
+    status: legacy_not_reference_comparable
+    legacy_eval_json: artifacts/logs/eval_baseline_3d_fullbands_ae_easy_test.json
+    notes: Older 180-band eval; keep out of reference RD claims.

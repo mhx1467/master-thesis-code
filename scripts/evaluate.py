@@ -101,6 +101,14 @@ def _validate_packed_output(packed: dict):
         raise RuntimeError("model.compress() returned strings=None")
 
 
+def _exact_reconstruction_target(model, x):
+    model_raw = model.module if hasattr(model, "module") else model
+    target_fn = getattr(model_raw, "exact_reconstruction_target", None)
+    if callable(target_fn):
+        return target_fn(x)
+    return x
+
+
 def _safe_filename_stem(value: str) -> str:
     # make user-provided run names safe for json file names.
     allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -205,41 +213,60 @@ def evaluate_model(
             raise RuntimeError("Model output must be a dict containing at least 'x_hat'.")
 
         x_hat = outputs["x_hat"].float()
+        x_target = outputs.get("x_target", x)
+        mask_for_loss = outputs.get("mask_for_loss", mask)
+        # Some models, e.g. pixel-sampled lossless TCN training runs, return predictions on
+        # a sampled/transformed target. Forward diagnostics must use that target, while actual
+        # compress/decompress metrics below still use the full input cube.
+        metric_target = x_target if tuple(x_hat.shape) == tuple(x_target.shape) else x
+        metric_mask = mask_for_loss if tuple(x_hat.shape) == tuple(x_target.shape) else mask
         z = outputs.get("z")
         likelihoods = outputs.get("likelihoods")
 
         totals["loss"] += (
             # loss here is a simple reconstruction mse diagnostic, not necessarily training loss.
-            masked_mse(x_hat, x, mask).item()
-            if mask is not None
-            else torch.mean((x_hat - x) ** 2).item()
+            masked_mse(x_hat, metric_target, metric_mask).item()
+            if metric_mask is not None
+            else torch.mean((x_hat - metric_target) ** 2).item()
         )
         totals["masked_mse"] += (
-            masked_mse(x_hat, x, mask) if mask is not None else torch.mean((x_hat - x) ** 2)
+            masked_mse(x_hat, metric_target, metric_mask)
+            if metric_mask is not None
+            else torch.mean((x_hat - metric_target) ** 2)
         ).item()
         totals["masked_mae"] += (
-            masked_mae(x_hat, x, mask) if mask is not None else torch.mean((x_hat - x).abs())
+            masked_mae(x_hat, metric_target, metric_mask)
+            if metric_mask is not None
+            else torch.mean((x_hat - metric_target).abs())
         ).item()
         totals["masked_psnr"] += (
-            masked_psnr(x_hat, x, mask, data_range=1.0) if mask is not None else psnr(x_hat, x)
+            masked_psnr(x_hat, metric_target, metric_mask, data_range=1.0)
+            if metric_mask is not None
+            else psnr(x_hat, metric_target)
         ).item()
-        totals["psnr"] += psnr(x_hat, x, data_range=1.0).item()
-        totals["ssim"] += ref_ssim(x_hat, x, data_range=1.0, channels=x.shape[1]).item()
+        totals["psnr"] += psnr(x_hat, metric_target, data_range=1.0).item()
+        totals["ssim"] += ref_ssim(
+            x_hat, metric_target, data_range=1.0, channels=x_hat.shape[1]
+        ).item()
 
         totals["masked_sam_deg"] += (
-            masked_sam_deg(x_hat, x, mask) if mask is not None else sam_deg(x_hat, x)
+            masked_sam_deg(x_hat, metric_target, metric_mask)
+            if metric_mask is not None
+            else sam_deg(x_hat, metric_target)
         ).item()
         totals["masked_sid"] += (
-            masked_sid(x_hat, x, mask) if mask is not None else sid(x_hat, x)
+            masked_sid(x_hat, metric_target, metric_mask)
+            if metric_mask is not None
+            else sid(x_hat, metric_target)
         ).item()
-        totals["mse"] += torch.mean((x_hat - x) ** 2).item()
-        totals["mae"] += mae(x_hat, x).item()
+        totals["mse"] += torch.mean((x_hat - metric_target) ** 2).item()
+        totals["mae"] += mae(x_hat, metric_target).item()
 
-        totals["sam_deg"] += ref_sam_deg(x_hat, x).item()
-        totals["sid"] += sid(x_hat, x).item()
+        totals["sam_deg"] += ref_sam_deg(x_hat, metric_target).item()
+        totals["sid"] += sid(x_hat, metric_target).item()
         totals["invalid_mae"] += (
-            invalid_region_mae(x_hat, mask)
-            if mask is not None
+            invalid_region_mae(x_hat, metric_mask)
+            if metric_mask is not None
             else torch.tensor(0.0, device=device)
         ).item()
         if likelihoods is not None:
@@ -284,6 +311,7 @@ def evaluate_model(
                 raise RuntimeError("model.decompress() must return a dict containing 'x_hat'")
 
             x_hat_actual = decoded["x_hat"].float()
+            exact_target = _exact_reconstruction_target(model, x).float()
             actual_available = True
 
             # actual metrics use the decoded reconstruction, not the differentiable forward pass.
@@ -314,10 +342,10 @@ def evaluate_model(
             ).item()
             totals["actual_mse"] += torch.mean((x_hat_actual - x) ** 2).item()
             totals["actual_mae"] += mae(x_hat_actual, x).item()
-            actual_mismatch_count += int((x_hat_actual != x).sum().item())
+            actual_mismatch_count += int((x_hat_actual != exact_target).sum().item())
             actual_max_abs_error = max(
                 actual_max_abs_error,
-                float((x_hat_actual - x).abs().max().item()),
+                float((x_hat_actual - exact_target).abs().max().item()),
             )
 
             with torch.no_grad():
@@ -474,7 +502,8 @@ def main():
         normalized=True,
         return_mask=True,
         drop_invalid_channels=data_section.get("drop_invalid_channels", True),
-        prefer_npy=True,
+        prefer_npy=data_section.get("prefer_npy", True),
+        npy_mmap=data_section.get("npy_mmap", False),
     )
     if args.subset_size:
         # subsets are useful for quick smoke checks without changing the split protocol.
@@ -493,7 +522,8 @@ def main():
     num_input_bands = sample_x.shape[0]
 
     print(f"Input bands: {num_input_bands}")
-    print("Evaluation dataset source: split-resolved benchmark DATA.npy artifacts")
+    eval_source = "benchmark DATA.npy artifacts" if data_section.get("prefer_npy", True) else "TIF"
+    print(f"Evaluation dataset source: split-resolved {eval_source}")
     print(f"Original bits per channel for CR estimation: {ORIGINAL_BITS_PER_CHANNEL:.0f}")
 
     model = build_model(

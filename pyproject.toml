@@ -68,3 +68,6 @@ line-length = 100
 target-version = ["py310"]
 include = '\.pyi?$'
 extend-exclude = '/(\.venv|artifacts|notebooks)/'
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

@@ -261,6 +261,13 @@ class SpectralTCNLossless(nn.Module):
         teacher, _ = self._teacher_and_target_from_symbols(symbols)
         return self._predict_from_teacher_values(teacher)
 
+    def exact_reconstruction_target(self, x: torch.Tensor) -> torch.Tensor:
+        symbols = self._to_symbols(x)
+        if self._is_exact_symbol_grid(x, symbols):
+            # Symbol-grid lossless coding reconstructs the canonical normalized symbol values.
+            return self._symbols_to_float(symbols)
+        return x
+
     def _teacher_and_target_from_symbols(
         self, symbols: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -342,16 +349,16 @@ class SpectralTCNLossless(nn.Module):
         return sampled_teacher.contiguous(), sampled_target.contiguous(), sampled_mask
 
     def _residuals_from_symbols(self, symbols: torch.Tensor) -> torch.Tensor:
-        teacher, _ = self._teacher_and_target_from_symbols(symbols)
-        predicted = self._predict_from_teacher_values(teacher)
         if self.prediction_mode == "value":
             # value mode predicts the next absolute spectral symbol.
-            predicted_symbols = self._to_symbols(predicted)
+            # Residuals must use the same one-step path as the decoder. Parallel Conv1d
+            # prediction can differ by a few rounded symbols on GPU due to kernel numerics.
+            predicted_symbols = self._predict_symbols_sequential_from_symbols(symbols)
             return (symbols - predicted_symbols).to(torch.int32)
 
         # delta mode predicts changes between adjacent bands before coding residuals.
         deltas = self._symbols_to_deltas(symbols)
-        predicted_deltas = self._to_delta_symbols(predicted)
+        predicted_deltas = self._predict_deltas_sequential_from_symbols(symbols)
         return (deltas - predicted_deltas).to(torch.int32)
 
     def _decode_symbols_from_residuals(

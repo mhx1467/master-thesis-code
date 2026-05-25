@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 from hsi_compression.engine.validate import validate_one_epoch
 from hsi_compression.losses import MaskedMSELoss
 from hsi_compression.models.registry import build_model
+from scripts.evaluate import evaluate_model
 
 
 def _read_payload_header(strings: bytes) -> dict:
@@ -156,6 +157,61 @@ def test_spectral_tcn_lossless_training_forward_can_sample_pixels():
     assert outputs["mask_for_loss"].shape == (2, 6, 2, 2)
 
 
+def test_evaluate_model_handles_pixel_sampled_tcn_forward_shape():
+    model = build_model(
+        "spectral_tcn_delta_lossless",
+        in_channels=8,
+        hidden_channels=8,
+        num_blocks=2,
+        pixels_per_patch=16,
+        raw_fallback=False,
+    )
+    # This targets forward diagnostic metric shape handling. Actual codec metrics are covered
+    # separately and disabled here to keep this unit test small.
+    model.supports_actual_compression = False
+
+    x_int = torch.randint(0, 10001, (1, 8, 16, 16), dtype=torch.int32)
+    x = x_int.to(torch.float32) / 10000.0
+
+    metrics = evaluate_model(
+        model=model,
+        loader=[{"x": x}],
+        device=torch.device("cpu"),
+        show_progress=False,
+        split_name="test",
+        use_amp=False,
+    )
+
+    assert metrics["num_batches"] == 1
+    assert metrics["psnr"] > 0.0
+    assert metrics["actual_bpppc"] is None
+
+
+def test_evaluate_model_reports_symbol_grid_exact_target():
+    model = build_model(
+        "spectral_tcn_delta_lossless",
+        in_channels=6,
+        hidden_channels=8,
+        num_blocks=2,
+        raw_fallback=False,
+    )
+    x_int = torch.randint(0, 10001, (1, 6, 16, 16), dtype=torch.int32)
+    x = x_int.to(torch.float32) / 10000.0 + 5e-8
+
+    metrics = evaluate_model(
+        model=model,
+        loader=[{"x": x}],
+        device=torch.device("cpu"),
+        show_progress=False,
+        split_name="test",
+        use_amp=False,
+    )
+
+    assert metrics["actual_exact_reconstruction"] is True
+    assert metrics["actual_mismatch_count"] == 0
+    assert metrics["actual_max_abs_error"] == 0.0
+
+
 def test_spectral_tcn_delta_lossless_training_target_is_delta_domain():
     model = build_model(
         "spectral_tcn_delta_lossless",
@@ -234,3 +290,30 @@ def test_lossless_validation_reports_actual_codec_metrics():
     assert metrics["actual_codec_batches"] == 1
     assert metrics["encode_ms_per_batch"] is not None
     assert metrics["decode_ms_per_batch"] is not None
+
+
+def test_lossless_validation_uses_symbol_grid_exact_target():
+    model = build_model(
+        "spectral_tcn_delta_lossless",
+        in_channels=6,
+        hidden_channels=8,
+        num_blocks=2,
+        raw_fallback=False,
+    )
+    x_int = torch.randint(0, 10001, (1, 6, 16, 16), dtype=torch.int32)
+    x = x_int.to(torch.float32) / 10000.0 + 5e-8
+    loader = DataLoader([{"x": x[0], "valid_mask": torch.ones_like(x[0], dtype=torch.bool)}])
+
+    metrics = validate_one_epoch(
+        model=model,
+        loader=loader,
+        loss_fn=MaskedMSELoss(),
+        device=torch.device("cpu"),
+        show_progress=False,
+        compute_sam=False,
+        actual_codec_eval_batches=1,
+    )
+
+    assert metrics["actual_exact_reconstruction"] is True
+    assert metrics["actual_mismatch_count"] == 0
+    assert metrics["actual_max_abs_error"] == 0.0
