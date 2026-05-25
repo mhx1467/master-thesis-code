@@ -458,17 +458,33 @@ def load_mask(path: str | Path | None, shape_hw: tuple[int, int]) -> np.ndarray 
             mask = np.asarray(archive["mask"])
     else:
         mask = np.asarray(np.load(path))
-    mask = np.squeeze(mask)
+    mask = np.asarray(mask)
+    while mask.ndim > 3:
+        singleton_axes = [axis for axis, dim in enumerate(mask.shape) if dim == 1]
+        if not singleton_axes:
+            break
+        mask = np.squeeze(mask, axis=singleton_axes[0])
     if mask.ndim == 3:
         # collapse mask cubes to one spatial mask when needed.
-        if mask.shape[0] == 1:
-            mask = mask[0]
-        elif mask.shape[-1] == 1:
-            mask = mask[..., 0]
-        elif tuple(mask.shape[-2:]) == tuple(shape_hw):
+        if tuple(mask.shape[-2:]) == tuple(shape_hw):
             mask = mask.max(axis=0)
+        elif tuple(mask.shape[:2]) == tuple(shape_hw):
+            mask = mask.max(axis=-1)
+        elif mask.shape[0] == 1:
+            mask = np.squeeze(mask, axis=0)
+        elif mask.shape[-1] == 1:
+            mask = np.squeeze(mask, axis=-1)
+        elif tuple(np.squeeze(mask).shape) == tuple(shape_hw):
+            mask = np.squeeze(mask)
         else:
             mask = mask.max(axis=0) if mask.shape[0] <= mask.shape[-1] else mask.max(axis=-1)
+    elif mask.ndim == 1:
+        if tuple(shape_hw) == (1, 1):
+            mask = np.asarray([[mask.any()]])
+        elif mask.size == int(shape_hw[0]) * int(shape_hw[1]):
+            mask = mask.reshape(shape_hw)
+        else:
+            raise ValueError(f"Mask shape {mask.shape} does not match image shape {shape_hw}")
     if tuple(mask.shape) != tuple(shape_hw):
         raise ValueError(f"Mask shape {mask.shape} does not match image shape {shape_hw}")
     return mask > 0

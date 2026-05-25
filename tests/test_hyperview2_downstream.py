@@ -19,7 +19,7 @@ from hsi_compression.downstream import (
     extract_spectral_features,
     hyperview_score,
 )
-from hsi_compression.downstream.hyperview2 import to_chw
+from hsi_compression.downstream.hyperview2 import load_mask, to_chw
 from hsi_compression.downstream.hyperview2_regressors import available_regressor_names
 
 
@@ -193,6 +193,33 @@ def test_hyperview2_compression_dataset_uses_npz_mask(tmp_path):
     assert item["valid_mask"].shape == (230, 2, 2)
     assert item["valid_mask"][:, 0, 0].all()
     assert not item["valid_mask"][:, 1, 1].any()
+
+
+def test_hyperview2_compression_dataset_accepts_singleton_spatial_mask(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
+    _write_labels(root / "train_gt.csv", [[1, 1, 2, 3, 4, 5, 6]])
+    cube = np.ones((230, 1, 1), dtype=np.float32)
+    mask = np.zeros((230, 1, 1), dtype=bool)
+    np.savez(root / "train" / "hsi_satellite" / "0001.npz", data=cube, mask=mask)
+
+    samples = build_hyperview2_samples(root, modality="prisma")
+    item = Hyperview2CompressionDataset(samples, modality="prisma", normalization="none")[0]
+
+    assert item["valid_mask"].shape == (230, 1, 1)
+    assert not item["valid_mask"].any()
+
+
+def test_load_mask_preserves_singleton_width_before_collapsing_spectral_axis(tmp_path):
+    path = tmp_path / "mask.npz"
+    mask = np.ones((230, 2, 1), dtype=bool)
+    mask[:, 1, 0] = False
+    np.savez(path, mask=mask)
+
+    loaded = load_mask(path, shape_hw=(2, 1))
+
+    assert loaded.shape == (2, 1)
+    assert loaded[:, 0].tolist() == [True, False]
 
 
 def test_collate_pixel_set_batch_pads_variable_pixel_counts():
