@@ -3,8 +3,8 @@ experiment:
   seed: 42
 
 data:
-  modality: from_downstream
-  normalization: from_downstream
+  modality: prisma
+  normalization: percentile
   batch_size: 64
   num_workers: 4
   pin_memory: true
