@@ -48,6 +48,8 @@ def test_existing_hierarchical_mamba_registry_key_stays_entropy_bottleneck_only(
 def test_registry_builds_hierarchical_mamba_hyperprior_without_mamba_blocks():
     model = _build_tiny_hyperprior_model()
 
+    assert model.compression_mode == "lossy"
+    assert model.supports_actual_compression is True
     assert model.latent_channels == 8
     assert model.hyper_latent_channels == 4
     assert model.proxy_bpppc > 0.0

@@ -19,7 +19,8 @@ from hsi_compression.downstream import (
     extract_spectral_features,
     hyperview_score,
 )
-from hsi_compression.downstream.hyperview2 import load_mask, to_chw
+from hsi_compression.downstream.hyperview2 import load_mask, normalize_cube, to_chw
+from hsi_compression.downstream.hyperview2_compression_eval import infer_recon_input_normalization
 from hsi_compression.downstream.hyperview2_regressors import available_regressor_names
 
 
@@ -126,6 +127,40 @@ def test_extract_spectral_features_rejects_unknown_feature_set():
 
     with pytest.raises(ValueError, match="feature_set"):
         extract_spectral_features(cube, feature_set="unknown")
+
+
+def test_reflectance_normalization_clips_and_zeros_invalid_pixels():
+    cube = np.asarray(
+        [
+            [[-0.5, 0.25], [1.5, np.nan]],
+            [[0.2, 0.4], [np.inf, 0.8]],
+        ],
+        dtype=np.float32,
+    )
+    mask = np.asarray([[True, False], [True, True]])
+
+    normalized = normalize_cube(cube, mask=mask, mode="reflectance_0_1")
+
+    assert normalized.dtype == np.float32
+    assert normalized[:, 0, 1].tolist() == [0.0, 0.0]
+    assert normalized[0, 0, 0].item() == pytest.approx(0.0)
+    assert normalized[0, 1, 0].item() == pytest.approx(1.0)
+    assert normalized[1, 1, 0].item() == pytest.approx(1.0)
+    assert normalized[0, 1, 1].item() == pytest.approx(0.0)
+
+    value_mask = np.ones_like(cube, dtype=bool)
+    value_mask[1, 1, 0] = False
+    normalized_with_value_mask = normalize_cube(cube, mask=value_mask, mode="reflectance_0_1")
+
+    assert normalized_with_value_mask[1, 1, 0].item() == pytest.approx(0.0)
+
+
+def test_infer_recon_input_normalization_detects_reflectance_variant_name():
+    assert (
+        infer_recon_input_normalization("hyperview2_mamba_input_reflectance_0_1")
+        == "reflectance_0_1"
+    )
+    assert infer_recon_input_normalization("hyperview2_mamba_input_hyspecnet") == "reflectance_0_1"
 
 
 def test_available_regressor_names_can_report_optional_models():

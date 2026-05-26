@@ -302,8 +302,7 @@ def resolve_hyperview2_root(dataset_root: str | Path) -> Path:
     if (nested / "train_gt.csv").is_file() and (nested / "train").is_dir():
         return nested
     raise FileNotFoundError(
-        "Expected HYPERVIEW2 root with train_gt.csv and train/. "
-        f"Checked: {root} and {nested}"
+        f"Expected HYPERVIEW2 root with train_gt.csv and train/. Checked: {root} and {nested}"
     )
 
 
@@ -331,7 +330,9 @@ def _resolve_hyperview2_array_path(array_dir: Path, raw_id: str) -> Path:
             if path.is_file():
                 return path
     checked = ", ".join(str(array_dir / f"{stem}.npz") for stem in _array_stem_candidates(raw_id))
-    raise FileNotFoundError(f"Could not find HYPERVIEW2 array for id {raw_id!r}. Checked: {checked}")
+    raise FileNotFoundError(
+        f"Could not find HYPERVIEW2 array for id {raw_id!r}. Checked: {checked}"
+    )
 
 
 def build_hyperview2_samples(
@@ -349,11 +350,7 @@ def build_hyperview2_samples(
     if split not in {"train", "test"}:
         raise ValueError("split must be one of: train, test")
 
-    label_path = (
-        Path(labels_csv).expanduser().resolve()
-        if labels_csv
-        else root / "train_gt.csv"
-    )
+    label_path = Path(labels_csv).expanduser().resolve() if labels_csv else root / "train_gt.csv"
     if not label_path.is_file():
         raise FileNotFoundError(f"HYPERVIEW2 labels CSV does not exist: {label_path}")
     array_dir = root / split / HYPERVIEW2_MODALITY_DIRS[modality]
@@ -498,6 +495,18 @@ def normalize_cube(
     percentile_high: float = 99.0,
 ) -> np.ndarray:
     cube = np.asarray(cube, dtype=np.float32)
+    if mode in {"reflectance_0_1", "hyspecnet"}:
+        normalized = np.nan_to_num(cube, nan=0.0, posinf=1.0, neginf=0.0)
+        normalized = np.clip(normalized, 0.0, 1.0).astype(np.float32)
+        if mask is not None:
+            mask_bool = np.asarray(mask, dtype=bool)
+            normalized = normalized.copy()
+            if mask_bool.shape == normalized.shape:
+                normalized[~mask_bool] = 0.0
+            else:
+                normalized[:, ~mask_bool] = 0.0
+        return normalized
+
     finite = np.isfinite(cube)
     if mask is not None:
         # normalization statistics should ignore pixels outside the valid mask.
@@ -516,7 +525,9 @@ def normalize_cube(
         low = float(low)
         high = float(high)
     else:
-        raise ValueError("normalization must be one of: none, minmax, percentile")
+        raise ValueError(
+            "normalization must be one of: none, minmax, percentile, reflectance_0_1, hyspecnet"
+        )
     if not math.isfinite(high - low) or high <= low:
         return np.zeros_like(cube, dtype=np.float32)
     return np.clip((cube - low) / (high - low), 0.0, 1.0).astype(np.float32)

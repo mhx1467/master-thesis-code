@@ -98,6 +98,8 @@ def infer_recon_input_normalization(name: str, payload: Mapping[str, Any] | None
         value = payload.get("input_normalization")
         if value:
             return str(value)
+    if name.endswith("_input_reflectance_0_1") or name.endswith("_input_hyspecnet"):
+        return "reflectance_0_1"
     if name.endswith("_input_percentile"):
         return "percentile"
     if name.endswith("_input_minmax"):

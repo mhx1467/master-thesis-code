@@ -124,6 +124,9 @@ class HierarchicalSpectralMambaAutoencoder(nn.Module):
     - keeps the entropy model simple in stage 1 so gains can be attributed to latent structure
     """
 
+    compression_mode = "lossy"
+    supports_actual_compression = True
+
     def __init__(
         self,
         in_channels: int,

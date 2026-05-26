@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--normalization",
         default="none",
-        choices=("none", "minmax", "percentile"),
+        choices=("none", "minmax", "percentile", "reflectance_0_1", "hyspecnet"),
         help="Per-sample cube normalization before feature extraction.",
     )
     parser.add_argument("--val-fraction", type=float, default=0.2)
@@ -178,7 +178,9 @@ def main() -> None:
         split="train",
         max_samples=args.max_samples,
     )
-    train_samples, val_samples = split_samples(samples, val_fraction=args.val_fraction, seed=args.seed)
+    train_samples, val_samples = split_samples(
+        samples, val_fraction=args.val_fraction, seed=args.seed
+    )
     x_train, y_train, train_ids = _extract_features(
         train_samples,
         modality=args.modality,

@@ -111,6 +111,13 @@ models:
     checkpoint: artifacts/checkpoints/hierarchical_spectral_mamba_hyperprior_k4_spatial_rd_lambda_0_01_best.pt
     notes: Active model and config exist, but no comparable checkpoint/evaluation is available yet.
 
+  - slug: hierarchical_mamba_hyperprior_k4_rd_0_001
+    label: Hierarchical Mamba K4 hyperprior RD 1e-3
+    family: mamba
+    status: needs_training_or_checkpoint
+    checkpoint: artifacts/checkpoints/hierarchical_spectral_mamba_hyperprior_k4_spatial_rd_lambda_0_001_best.pt
+    notes: Matched to the recent K4 spatial RD 1e-3 / ~0.03 bpppc comparison point.
+
   - slug: legacy_baseline_1d_ae_v2
     label: Legacy 1D AE v2
     family: legacy_baseline

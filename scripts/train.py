@@ -22,6 +22,63 @@ from hsi_compression.utils import (
 from hsi_compression.utils.wandb_utils import init_wandb
 
 
+def _split_main_aux_parameters(model):
+    """Return CompressAI-style disjoint optimizer parameter groups."""
+    main_parameters = []
+    aux_parameters = []
+    seen_main = set()
+    seen_aux = set()
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name.endswith(".quantiles"):
+            aux_parameters.append(parameter)
+            seen_aux.add(id(parameter))
+        else:
+            main_parameters.append(parameter)
+            seen_main.add(id(parameter))
+
+    overlap = seen_main & seen_aux
+    if overlap:
+        raise RuntimeError("Main and aux optimizer parameter groups must be disjoint")
+    return main_parameters, aux_parameters
+
+
+def _load_pretrained_weights(model, checkpoint: dict, compatible_only: bool = False):
+    if not compatible_only:
+        model.load_state_dict(checkpoint["model_state_dict"])
+        return {
+            "loaded": len(checkpoint["model_state_dict"]),
+            "skipped": 0,
+            "missing": 0,
+        }
+
+    target_state = model.state_dict()
+    source_state = checkpoint["model_state_dict"]
+    compatible_state = {}
+    skipped = {}
+    for name, value in source_state.items():
+        target = target_state.get(name)
+        if target is not None and tuple(target.shape) == tuple(value.shape):
+            compatible_state[name] = value
+        else:
+            skipped[name] = {
+                "source_shape": tuple(value.shape),
+                "target_shape": tuple(target.shape) if target is not None else None,
+            }
+
+    target_state.update(compatible_state)
+    model.load_state_dict(target_state)
+    missing = sorted(set(target_state) - set(compatible_state))
+    return {
+        "loaded": len(compatible_state),
+        "skipped": len(skipped),
+        "missing": len(missing),
+        "skipped_keys": skipped,
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train HSI compression model")
     parser.add_argument("--config", type=str, required=True)
@@ -47,6 +104,14 @@ def parse_args():
         "--pretrained",
         type=str,
         default=None,
+    )
+    parser.add_argument(
+        "--pretrained-compatible",
+        action="store_true",
+        help=(
+            "Load only checkpoint tensors whose keys and shapes match the current model. "
+            "Use for staged variants such as Mamba entropy bottleneck -> Mamba hyperprior."
+        ),
     )
     parser.add_argument(
         "--override-rd-lambda",
@@ -271,7 +336,17 @@ def main():
         # pretrained checkpoints are used for staged rd fine tuning
         print(f"\n[RD Cascade] Ładowanie pre-trenowanych wag z: {pretrained_path}")
         ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model_state_dict"])
+        load_report = _load_pretrained_weights(
+            model,
+            ckpt,
+            compatible_only=args.pretrained_compatible,
+        )
+        if args.pretrained_compatible:
+            print(
+                "[RD Cascade] Załadowano kompatybilne wagi: "
+                f"{load_report['loaded']} | skipped={load_report['skipped']} | "
+                f"missing/current-only={load_report['missing']}"
+            )
         print("[RD Cascade] Wagi załadowane pomyślnie. Rozpoczynamy Fine-Tuning.\n")
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -292,9 +367,10 @@ def main():
     fast_train_metrics = training_cfg.get("fast_train_metrics", False)
     scheduler_cfg = training_cfg.get("scheduler", {})
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    # compressai entropy models expose quantile parameters that use a separate aux loss.
-    aux_parameters = [p for n, p in model.named_parameters() if n.endswith(".quantiles")]
+    # CompressAI entropy bottlenecks expose quantile parameters that should be optimized only
+    # through the auxiliary loss. Keeping them out of the main optimizer avoids double updates.
+    main_parameters, aux_parameters = _split_main_aux_parameters(model)
+    optimizer = torch.optim.Adam(main_parameters, lr=lr)
     aux_optimizer = torch.optim.Adam(aux_parameters, lr=1e-3) if aux_parameters else None
     scheduler = None
     if scheduler_cfg.get("enabled", False):
