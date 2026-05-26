@@ -309,10 +309,20 @@ def main():
         # rate-distortion loss adds a bitrate term based on entropy likelihoods.
         rd_lambda = training_cfg.get("rd_lambda", 0.01)
         distortion_metric = training_cfg.get("distortion_metric", "masked_mse")
-        loss_fn = build_loss(
-            "rate_distortion", lmbda=rd_lambda, distortion_metric=distortion_metric
+        distortion_kwargs = training_cfg.get(
+            "distortion_kwargs",
+            loss_kwargs.get("distortion_kwargs", {}),
         )
-        print(f"Loss: Rate-Distortion (lambda={rd_lambda}, D={distortion_metric})")
+        loss_fn = build_loss(
+            "rate_distortion",
+            lmbda=rd_lambda,
+            distortion_metric=distortion_metric,
+            distortion_kwargs=distortion_kwargs,
+        )
+        print(
+            f"Loss: Rate-Distortion (lambda={rd_lambda}, D={distortion_metric}, "
+            f"D_kwargs={distortion_kwargs})"
+        )
     else:
         loss_fn = build_loss(loss_name, **loss_kwargs)
     exp_name = experiment_cfg.get("name", "experiment")
