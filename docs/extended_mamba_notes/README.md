@@ -20,3 +20,5 @@ as non-reference-comparable.
 - `spatial_mamba_literature_decision.md`: literature-backed decision on whether to add spatial
   Mamba immediately.
 - `roadmap.md`: staged plan for extending the current hierarchical Mamba codec.
+- `hyperview2_downstream_diagnostics.md`: current HYPERVIEW2 downstream diagnostics for
+  reconstructed Mamba cubes and the resulting spectral-feature preservation recommendation.
