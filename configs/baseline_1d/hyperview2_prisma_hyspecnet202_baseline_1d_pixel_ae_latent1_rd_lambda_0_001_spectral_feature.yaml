@@ -1,0 +1,59 @@
+experiment:
+  name: hyperview2_prisma_hyspecnet202_baseline_1d_pixel_ae_latent1_rd_lambda_0_001_spectral_feature
+  seed: 42
+
+data:
+  dataset: hyperview2
+  modality: prisma
+  normalization: reflectance_0_1
+  spectral_mapping: hyspecnet_202_approx
+  val_fraction: 0.2
+  batch_size: 128
+  num_workers: 0
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: null
+  pad_multiple: 1
+  min_spatial_size: 1
+  train_subset_size: null
+  val_subset_size: null
+  subset_seed: 42
+
+training:
+  use_amp: true
+  epochs: 60
+  lr: 0.001
+  loss_name: rate_distortion
+  rd_lambda: 0.001
+  distortion_metric: spectral_feature
+  distortion_kwargs:
+    pixel_weight: 1.0
+    mean_weight: 0.5
+    std_weight: 0.25
+    first_derivative_weight: 1.0
+    second_derivative_weight: 0.25
+    spectral_cosine_weight: 0.01
+  grad_clip_max_norm: 1.0
+  fast_train_metrics: true
+  scheduler:
+    enabled: true
+    name: cosine
+    T_max: 60
+    eta_min: 1.0e-5
+  early_stopping:
+    enabled: true
+    patience: 12
+    psnr_min_delta: 0.01
+  sam_every_n_epochs: 5
+
+model:
+  model_name: baseline_1d_pixel_ae
+  model_kwargs:
+    in_channels: 202
+    latent_channels: 1
+    hidden_channels: 64
+    output_activation: sigmoid
+
+logging:
+  use_wandb: true
+  project: hsi-compression-paper
