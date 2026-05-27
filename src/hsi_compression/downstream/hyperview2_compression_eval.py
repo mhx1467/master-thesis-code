@@ -492,6 +492,7 @@ def reconstruct_checkpoint(
         batch_size=checkpoint.batch_size,
         shuffle=False,
         num_workers=checkpoint.num_workers,
+        pin_memory=device.type == "cuda",
         collate_fn=partial(
             collate_compression_batch,
             pad_multiple=checkpoint.pad_multiple,
@@ -649,12 +650,259 @@ def reconstruct_checkpoint(
     return recon_root, summary
 
 
+def reconstruct_spectral_resample_passthrough(
+    source_root: str | Path,
+    recon_parent: str | Path,
+    device: torch.device,
+    variant_name: str = "hyperview2_spectral_resample_passthrough_hyspecnet202_to_230",
+    modality: str = "prisma",
+    normalization: str = "reflectance_0_1",
+    spectral_mapping_name: str = "hyspecnet_202_approx",
+    batch_size: int = 16,
+    num_workers: int = 2,
+    pad_multiple: int = 4,
+    min_spatial_size: int = 4,
+    split: str = "train",
+) -> tuple[Path, dict[str, Any]]:
+    """Write a no-codec spectral resampling baseline as HYPERVIEW2 reconstruction files."""
+    print(
+        f"Reconstructing spectral resample passthrough: variant={variant_name}, "
+        f"input_norm={normalization}, mapping={spectral_mapping_name}"
+    )
+    samples = build_hyperview2_samples(source_root, modality=modality, split=split)
+    dataset = Hyperview2CompressionDataset(
+        samples,
+        modality=modality,
+        normalization=normalization,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        collate_fn=partial(
+            collate_compression_batch,
+            pad_multiple=pad_multiple,
+            min_spatial_size=min_spatial_size,
+        ),
+    )
+    first = dataset[0]
+    input_channels = int(first["x"].shape[0])
+    spectral_mapping = build_spectral_mapping(
+        spectral_mapping_name,
+        source_root=source_root,
+        modality=modality,
+        input_channels=input_channels,
+    )
+    if spectral_mapping is None:
+        raise ValueError("spectral_mapping_name must resolve to a mapping for passthrough")
+    model_input_channels = int(spectral_mapping["model_input_channels"])
+
+    recon_root = prepare_recon_root(Path(recon_parent) / variant_name / "HYPERVIEW2", source_root)
+    out_dir = recon_root / split / "hsi_satellite"
+    totals = {
+        "mse_sum": 0.0,
+        "mae_sum": 0.0,
+        "values": 0.0,
+        "psnr_sum": 0.0,
+        "sam_sum": 0.0,
+        "samples": 0,
+        "metric_samples": 0,
+        "encode_time_sec": 0.0,
+        "decode_time_sec": 0.0,
+    }
+
+    with torch.no_grad():
+        for batch in tqdm(loader, desc=f"resample-passthrough:{variant_name}:{split}"):
+            x = batch["x"].to(device, non_blocking=True)
+            mask = batch["valid_mask"].to(device, non_blocking=True)
+            start = time.perf_counter()
+            x_model, _ = apply_input_spectral_mapping(x, mask, spectral_mapping)
+            x_hat = invert_output_spectral_mapping(x_model.float(), spectral_mapping)
+            totals["encode_time_sec"] += time.perf_counter() - start
+            x_hat = x_hat.float().clamp(0.0, 1.0)
+
+            mask_f = mask.float()
+            valid_values = float(mask_f.sum().item())
+            if valid_values > 0:
+                psnr_value = masked_psnr(x_hat, x, mask)
+                sam_value = masked_sam_deg(x_hat, x, mask)
+                if torch.isfinite(psnr_value):
+                    totals["psnr_sum"] += float(psnr_value.item()) * x.shape[0]
+                if torch.isfinite(sam_value):
+                    totals["sam_sum"] += float(sam_value.item()) * x.shape[0]
+                totals["metric_samples"] += int(x.shape[0])
+            totals["samples"] += int(x.shape[0])
+            totals["mse_sum"] += float(((x_hat - x) ** 2 * mask_f).sum().item())
+            totals["mae_sum"] += float(((x_hat - x).abs() * mask_f).sum().item())
+            totals["values"] += valid_values
+
+            for idx, sample_id in enumerate(batch["sample_id"]):
+                c, h, w = batch["original_shape"][idx]
+                arr = x_hat[idx, :c, :h, :w].detach().cpu().numpy().astype(np.float32)
+                valid = mask[idx, :c, :h, :w].detach().cpu().numpy().astype(bool)
+                np.savez_compressed(
+                    out_dir / f"{safe_sample_stem(sample_id)}.npz", data=arr, mask=valid
+                )
+
+    values = max(totals["values"], 1.0)
+    summary = {
+        "name": "spectral_resample_passthrough",
+        "variant": variant_name,
+        "recon_root": str(recon_root),
+        "baseline_type": "no_codec_spectral_resample_passthrough",
+        "input_modality": modality,
+        "input_normalization": normalization,
+        "input_channels": input_channels,
+        "model_input_channels": model_input_channels,
+        "output_channels": input_channels,
+        "recon_feature_normalization": "none",
+        "saved_reconstruction_normalization": "none",
+        "reconstruction_value_space": f"resample_inverse_for_{normalization}_input",
+        "samples": totals["samples"],
+        "masked_mse": totals["mse_sum"] / values,
+        "masked_mae": totals["mae_sum"] / values,
+        "masked_psnr": totals["psnr_sum"] / max(totals["metric_samples"], 1),
+        "masked_sam_deg": totals["sam_sum"] / max(totals["metric_samples"], 1),
+        "metric_samples": totals["metric_samples"],
+        "actual_bpppc": None,
+        "actual_bpppc_model_input": None,
+        "actual_cr_16bit": None,
+        "actual_cr_16bit_model_input": None,
+        "encode_time_sec": totals["encode_time_sec"],
+        "decode_time_sec": totals["decode_time_sec"],
+        "adapter_notes": [],
+        "spectral_mapping": spectral_mapping,
+    }
+    (recon_root / "reconstruction_summary.json").write_text(
+        json.dumps(summary, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return recon_root, summary
+
+
+def _torch_spectral_gradient(values: torch.Tensor) -> torch.Tensor:
+    if values.numel() <= 1:
+        return torch.zeros_like(values)
+    gradient = torch.empty_like(values)
+    gradient[0] = values[1] - values[0]
+    gradient[-1] = values[-1] - values[-2]
+    if values.numel() > 2:
+        gradient[1:-1] = (values[2:] - values[:-2]) * 0.5
+    return gradient
+
+
+def _torch_spectral_features_from_normalized(
+    cube: torch.Tensor,
+    value_mask: torch.Tensor,
+    feature_set: str,
+) -> torch.Tensor:
+    c, h, w = cube.shape
+    flat = cube.reshape(c, h * w)
+    mask_flat = value_mask.reshape(c, h * w).bool()
+    valid = mask_flat.all(dim=0)
+    valid_fraction = valid.float().mean() if valid.numel() else torch.zeros((), device=cube.device)
+    valid_values = flat[:, valid]
+    if valid_values.numel() == 0:
+        mean = torch.zeros(c, dtype=torch.float32, device=cube.device)
+        std = torch.zeros_like(mean)
+    else:
+        mean = valid_values.mean(dim=1)
+        std = valid_values.std(dim=1, unbiased=False)
+    features = [mean, std]
+
+    if feature_set in {"mean_std_derivatives", "full_stats"}:
+        features.extend([_torch_spectral_gradient(mean), _torch_spectral_gradient(std)])
+
+    if feature_set == "full_stats":
+        if valid_values.numel() == 0:
+            zeros = torch.zeros(c, dtype=torch.float32, device=cube.device)
+            features.extend([zeros, zeros, zeros, zeros, zeros])
+        else:
+            features.extend(
+                [
+                    valid_values.min(dim=1).values,
+                    valid_values.max(dim=1).values,
+                    torch.quantile(valid_values, 0.5, dim=1),
+                    torch.quantile(valid_values, 0.25, dim=1),
+                    torch.quantile(valid_values, 0.75, dim=1),
+                ]
+            )
+
+    features.append(valid_fraction.reshape(1))
+    return torch.cat(features).float()
+
+
+def _make_feature_matrix_torch(
+    samples: Sequence[Any],
+    modality: str,
+    normalization: str,
+    feature_set: str,
+    device: torch.device,
+    batch_size: int,
+    num_workers: int,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    dataset = Hyperview2CompressionDataset(
+        samples,
+        modality=modality,
+        normalization=normalization,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        collate_fn=partial(
+            collate_compression_batch,
+            pad_multiple=1,
+            min_spatial_size=1,
+        ),
+    )
+    targets_by_id = {str(sample.sample_id): sample.target.astype(np.float32) for sample in samples}
+    xs, ys, ids = [], [], []
+    desc = f"features:{modality}:{normalization}:{feature_set}:{device.type}"
+    for batch in tqdm(loader, desc=desc):
+        x = batch["x"].to(device, non_blocking=True)
+        mask = batch["valid_mask"].to(device, non_blocking=True)
+        batch_features = []
+        for idx in range(x.shape[0]):
+            c, h, w = batch["original_shape"][idx]
+            batch_features.append(
+                _torch_spectral_features_from_normalized(
+                    x[idx, :c, :h, :w],
+                    mask[idx, :c, :h, :w],
+                    feature_set,
+                )
+            )
+        xs.append(torch.stack(batch_features, dim=0).detach().cpu().numpy())
+        batch_ids = [str(sample_id) for sample_id in batch["sample_id"]]
+        ys.append(np.stack([targets_by_id[sample_id] for sample_id in batch_ids], axis=0))
+        ids.extend(batch_ids)
+    return np.concatenate(xs, axis=0).astype(np.float32), np.concatenate(ys, axis=0), ids
+
+
 def make_feature_matrix(
     samples: Sequence[Any],
     modality: str,
     normalization: str,
     feature_set: str,
+    feature_device: torch.device | None = None,
+    batch_size: int = 64,
+    num_workers: int = 2,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    if feature_device is not None:
+        return _make_feature_matrix_torch(
+            samples,
+            modality,
+            normalization,
+            feature_set,
+            feature_device,
+            batch_size=batch_size,
+            num_workers=num_workers,
+        )
+
     dataset = Hyperview2FeatureDataset(
         samples,
         modality=modality,
@@ -815,6 +1063,9 @@ def evaluate_downstream_regressors(
     val_fraction: float = 0.2,
     seed: int = 42,
     n_jobs: int | None = -1,
+    feature_device: torch.device | None = None,
+    feature_batch_size: int = 64,
+    feature_num_workers: int = 2,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     original_samples = build_hyperview2_samples(hv2_root, modality=modality, split="train")
     train_samples, val_samples = split_samples(
@@ -825,12 +1076,18 @@ def evaluate_downstream_regressors(
         modality,
         original_feature_normalization,
         feature_set,
+        feature_device=feature_device,
+        batch_size=feature_batch_size,
+        num_workers=feature_num_workers,
     )
     x_val_orig, y_val, val_ids = make_feature_matrix(
         val_samples,
         modality,
         original_feature_normalization,
         feature_set,
+        feature_device=feature_device,
+        batch_size=feature_batch_size,
+        num_workers=feature_num_workers,
     )
     baseline_mse = (
         ((y_val - y_train.mean(axis=0, keepdims=True)) ** 2).mean(axis=0).astype(np.float32)
@@ -866,12 +1123,18 @@ def evaluate_downstream_regressors(
             modality,
             recon_feature_normalization,
             feature_set,
+            feature_device=feature_device,
+            batch_size=feature_batch_size,
+            num_workers=feature_num_workers,
         )
         x_val_recon, y_val_recon, _ = make_feature_matrix(
             recon_val_samples,
             modality,
             recon_feature_normalization,
             feature_set,
+            feature_device=feature_device,
+            batch_size=feature_batch_size,
+            num_workers=feature_num_workers,
         )
 
         df, details, rows = run_regressors(
@@ -939,6 +1202,9 @@ def evaluate_downstream_regressors(
         "val_sample_ids": val_ids,
         "model_names": list(model_names),
         "recon_roots": {name: str(root) for name, root in recon_roots.items()},
+        "feature_device": str(feature_device) if feature_device is not None else "cpu_numpy",
+        "feature_batch_size": feature_batch_size,
+        "feature_num_workers": feature_num_workers,
     }
     payload = {
         "protocol": protocol,

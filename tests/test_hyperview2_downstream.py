@@ -26,6 +26,8 @@ from hsi_compression.downstream.hyperview2_compression_eval import (
     build_spectral_mapping,
     infer_recon_input_normalization,
     invert_output_spectral_mapping,
+    make_feature_matrix,
+    reconstruct_spectral_resample_passthrough,
 )
 from hsi_compression.downstream.hyperview2_regressors import available_regressor_names
 
@@ -257,6 +259,81 @@ def test_hyspecnet_202_spectral_mapping_roundtrip_shapes(tmp_path):
     assert mask_model.shape == (1, 202, 2, 3)
     assert x_out.shape == (1, 230, 2, 3)
     assert mask_model.all()
+
+
+def test_spectral_resample_passthrough_writes_hyperview2_reconstruction(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
+    _write_labels(
+        root / "train_gt.csv",
+        [
+            [1, 1, 2, 3, 4, 5, 6],
+            [2, 2, 3, 4, 5, 6, 7],
+        ],
+    )
+    wavelengths = {f"Band {idx}": float(400 + idx * 9) for idx in range(230)}
+    (root / "wavelengths.json").write_text(
+        json.dumps({"hsi_satellite_wavelengths": wavelengths}),
+        encoding="utf-8",
+    )
+    cube = np.linspace(0.0, 1.0, num=230 * 1 * 2, dtype=np.float32).reshape(230, 1, 2)
+    mask = np.ones((230, 1, 2), dtype=bool)
+    np.savez(root / "train" / "hsi_satellite" / "0001.npz", data=cube, mask=mask)
+    np.savez(root / "train" / "hsi_satellite" / "0002.npz", data=cube[::-1].copy(), mask=mask)
+
+    recon_root, summary = reconstruct_spectral_resample_passthrough(
+        source_root=root,
+        recon_parent=tmp_path / "recons",
+        device=torch.device("cpu"),
+        variant_name="resample_control",
+        batch_size=2,
+        num_workers=0,
+    )
+
+    assert summary["baseline_type"] == "no_codec_spectral_resample_passthrough"
+    assert summary["input_channels"] == 230
+    assert summary["model_input_channels"] == 202
+    assert summary["output_channels"] == 230
+    assert summary["samples"] == 2
+    assert (recon_root / "train" / "hsi_satellite" / "0001.npz").exists()
+
+
+def test_torch_feature_matrix_matches_numpy_feature_matrix(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
+    _write_labels(
+        root / "train_gt.csv",
+        [
+            [1, 1, 2, 3, 4, 5, 6],
+            [2, 2, 3, 4, 5, 6, 7],
+        ],
+    )
+    cube = np.linspace(0.0, 1.0, num=230 * 2 * 3, dtype=np.float32).reshape(230, 2, 3)
+    mask = np.ones((2, 3), dtype=bool)
+    mask[1, 2] = False
+    np.savez(root / "train" / "hsi_satellite" / "0001.npz", data=cube, mask=mask)
+    np.savez(root / "train" / "hsi_satellite" / "0002.npz", data=cube[::-1].copy(), mask=mask)
+    samples = build_hyperview2_samples(root, modality="prisma")
+
+    x_numpy, y_numpy, ids_numpy = make_feature_matrix(
+        samples,
+        modality="prisma",
+        normalization="reflectance_0_1",
+        feature_set="mean_std_derivatives",
+    )
+    x_torch, y_torch, ids_torch = make_feature_matrix(
+        samples,
+        modality="prisma",
+        normalization="reflectance_0_1",
+        feature_set="mean_std_derivatives",
+        feature_device=torch.device("cpu"),
+        batch_size=2,
+        num_workers=0,
+    )
+
+    assert ids_torch == ids_numpy
+    np.testing.assert_allclose(y_torch, y_numpy)
+    np.testing.assert_allclose(x_torch, x_numpy, rtol=1e-6, atol=1e-6)
 
 
 def test_hyperview2_compression_dataset_accepts_singleton_spatial_mask(tmp_path):
