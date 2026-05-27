@@ -782,6 +782,341 @@ def reconstruct_spectral_resample_passthrough(
     return recon_root, summary
 
 
+def _paired_compression_loader(
+    samples: Sequence[Any],
+    modality: str,
+    normalization: str,
+    batch_size: int,
+    num_workers: int,
+    pad_multiple: int,
+    min_spatial_size: int,
+    device: torch.device,
+) -> DataLoader:
+    dataset = Hyperview2CompressionDataset(
+        samples,
+        modality=modality,
+        normalization=normalization,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        collate_fn=partial(
+            collate_compression_batch,
+            pad_multiple=pad_multiple,
+            min_spatial_size=min_spatial_size,
+        ),
+    )
+
+
+def _assert_matching_batch_ids(
+    original_batch: Mapping[str, Any],
+    recon_batch: Mapping[str, Any],
+) -> None:
+    original_ids = [str(sample_id) for sample_id in original_batch["sample_id"]]
+    recon_ids = [str(sample_id) for sample_id in recon_batch["sample_id"]]
+    if original_ids != recon_ids:
+        raise RuntimeError(
+            "Original and reconstruction sample order differs: "
+            f"original={original_ids[:4]}, recon={recon_ids[:4]}"
+        )
+
+
+def fit_per_band_affine_calibration(
+    original_root: str | Path,
+    recon_root: str | Path,
+    sample_ids: Sequence[str],
+    device: torch.device,
+    modality: str = "prisma",
+    original_normalization: str = "reflectance_0_1",
+    recon_normalization: str = "none",
+    batch_size: int = 16,
+    num_workers: int = 2,
+    pad_multiple: int = 4,
+    min_spatial_size: int = 4,
+    eps: float = 1e-8,
+) -> dict[str, Any]:
+    """Fit y ~= scale * x + offset per band using only the provided sample ids.
+
+    Here ``x`` is the reconstructed cube and ``y`` is the normalized original cube. The caller is
+    responsible for passing only training split ids when this is used as a downstream diagnostic.
+    """
+
+    if not sample_ids:
+        raise ValueError("sample_ids must not be empty")
+    sample_ids = [str(sample_id) for sample_id in sample_ids]
+    original_samples = samples_by_ids(original_root, sample_ids, modality)
+    recon_samples = samples_by_ids(recon_root, sample_ids, modality)
+    original_loader = _paired_compression_loader(
+        original_samples,
+        modality=modality,
+        normalization=original_normalization,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pad_multiple=pad_multiple,
+        min_spatial_size=min_spatial_size,
+        device=device,
+    )
+    recon_loader = _paired_compression_loader(
+        recon_samples,
+        modality=modality,
+        normalization=recon_normalization,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pad_multiple=pad_multiple,
+        min_spatial_size=min_spatial_size,
+        device=device,
+    )
+
+    first = Hyperview2CompressionDataset(
+        original_samples,
+        modality=modality,
+        normalization=original_normalization,
+    )[0]
+    channels = int(first["x"].shape[0])
+    sums = {
+        "count": torch.zeros(channels, dtype=torch.float64, device=device),
+        "x": torch.zeros(channels, dtype=torch.float64, device=device),
+        "y": torch.zeros(channels, dtype=torch.float64, device=device),
+        "xx": torch.zeros(channels, dtype=torch.float64, device=device),
+        "xy": torch.zeros(channels, dtype=torch.float64, device=device),
+    }
+
+    with torch.no_grad():
+        for original_batch, recon_batch in tqdm(
+            zip(original_loader, recon_loader, strict=True),
+            total=len(original_loader),
+            desc="fit-affine-calibration",
+        ):
+            _assert_matching_batch_ids(original_batch, recon_batch)
+            original = original_batch["x"].to(device=device, dtype=torch.float64)
+            recon = recon_batch["x"].to(device=device, dtype=torch.float64)
+            original_mask = original_batch["valid_mask"].to(device=device).bool()
+            recon_mask = recon_batch["valid_mask"].to(device=device).bool()
+            if original.shape[1] != channels or recon.shape[1] != channels:
+                raise ValueError(
+                    f"Expected {channels} channels, got original={original.shape[1]} "
+                    f"and recon={recon.shape[1]}"
+                )
+            h = min(original.shape[-2], recon.shape[-2])
+            w = min(original.shape[-1], recon.shape[-1])
+            original = original[:, :, :h, :w]
+            recon = recon[:, :, :h, :w]
+            valid = (original_mask[:, :, :h, :w] & recon_mask[:, :, :h, :w]).to(torch.float64)
+
+            sums["count"] += valid.sum(dim=(0, 2, 3))
+            sums["x"] += (recon * valid).sum(dim=(0, 2, 3))
+            sums["y"] += (original * valid).sum(dim=(0, 2, 3))
+            sums["xx"] += (recon.square() * valid).sum(dim=(0, 2, 3))
+            sums["xy"] += (recon * original * valid).sum(dim=(0, 2, 3))
+
+    count = sums["count"]
+    valid_channels = count > 0
+    safe_count = count.clamp_min(1.0)
+    mean_x = sums["x"] / safe_count
+    mean_y = sums["y"] / safe_count
+    denom = sums["xx"] - sums["x"].square() / safe_count
+    numer = sums["xy"] - sums["x"] * sums["y"] / safe_count
+
+    scale = torch.ones(channels, dtype=torch.float64, device=device)
+    fit_mask = valid_channels & (denom.abs() > eps)
+    scale[fit_mask] = numer[fit_mask] / denom[fit_mask]
+    offset = torch.zeros(channels, dtype=torch.float64, device=device)
+    offset[valid_channels] = mean_y[valid_channels] - scale[valid_channels] * mean_x[valid_channels]
+
+    return {
+        "scale": scale.float().cpu().numpy(),
+        "offset": offset.float().cpu().numpy(),
+        "count": count.cpu().numpy(),
+        "sample_ids": sample_ids,
+        "eps": float(eps),
+    }
+
+
+def reconstruct_affine_calibrated_reconstruction(
+    original_root: str | Path,
+    recon_root: str | Path,
+    recon_parent: str | Path,
+    variant_name: str,
+    calibration_sample_ids: Sequence[str],
+    device: torch.device,
+    source_variant: str | None = None,
+    modality: str = "prisma",
+    original_normalization: str = "reflectance_0_1",
+    recon_normalization: str = "none",
+    batch_size: int = 16,
+    num_workers: int = 2,
+    pad_multiple: int = 4,
+    min_spatial_size: int = 4,
+    split: str = "train",
+) -> tuple[Path, dict[str, Any]]:
+    """Write a train-fit per-band affine calibrated reconstruction root."""
+
+    print(
+        f"Reconstructing affine-calibrated variant={variant_name}, "
+        f"source={source_variant or Path(recon_root).parent.name}, "
+        f"calibration_samples={len(calibration_sample_ids)}"
+    )
+    start_fit = time.perf_counter()
+    calibration = fit_per_band_affine_calibration(
+        original_root=original_root,
+        recon_root=recon_root,
+        sample_ids=calibration_sample_ids,
+        device=device,
+        modality=modality,
+        original_normalization=original_normalization,
+        recon_normalization=recon_normalization,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pad_multiple=pad_multiple,
+        min_spatial_size=min_spatial_size,
+    )
+    fit_time_sec = time.perf_counter() - start_fit
+    scale = torch.as_tensor(calibration["scale"], device=device, dtype=torch.float32).view(
+        1, -1, 1, 1
+    )
+    offset = torch.as_tensor(calibration["offset"], device=device, dtype=torch.float32).view(
+        1, -1, 1, 1
+    )
+
+    original_samples = build_hyperview2_samples(original_root, modality=modality, split=split)
+    sample_ids = [sample.sample_id for sample in original_samples]
+    recon_samples = samples_by_ids(recon_root, sample_ids, modality)
+    original_loader = _paired_compression_loader(
+        original_samples,
+        modality=modality,
+        normalization=original_normalization,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pad_multiple=pad_multiple,
+        min_spatial_size=min_spatial_size,
+        device=device,
+    )
+    recon_loader = _paired_compression_loader(
+        recon_samples,
+        modality=modality,
+        normalization=recon_normalization,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pad_multiple=pad_multiple,
+        min_spatial_size=min_spatial_size,
+        device=device,
+    )
+
+    calibrated_root = prepare_recon_root(
+        Path(recon_parent) / variant_name / "HYPERVIEW2",
+        original_root,
+    )
+    out_dir = calibrated_root / split / "hsi_satellite"
+    totals = {
+        "mse_sum": 0.0,
+        "mae_sum": 0.0,
+        "values": 0.0,
+        "psnr_sum": 0.0,
+        "sam_sum": 0.0,
+        "samples": 0,
+        "metric_samples": 0,
+        "apply_time_sec": 0.0,
+    }
+
+    with torch.no_grad():
+        for original_batch, recon_batch in tqdm(
+            zip(original_loader, recon_loader, strict=True),
+            total=len(original_loader),
+            desc=f"affine-calibrated:{variant_name}:{split}",
+        ):
+            _assert_matching_batch_ids(original_batch, recon_batch)
+            original = original_batch["x"].to(device=device, dtype=torch.float32)
+            recon = recon_batch["x"].to(device=device, dtype=torch.float32)
+            original_mask = original_batch["valid_mask"].to(device=device).bool()
+            recon_mask = recon_batch["valid_mask"].to(device=device).bool()
+            h = min(original.shape[-2], recon.shape[-2])
+            w = min(original.shape[-1], recon.shape[-1])
+            original = original[:, :, :h, :w]
+            recon = recon[:, :, :h, :w]
+            mask = original_mask[:, :, :h, :w] & recon_mask[:, :, :h, :w]
+
+            start_apply = time.perf_counter()
+            calibrated = recon.mul(scale).add(offset).clamp(0.0, 1.0)
+            totals["apply_time_sec"] += time.perf_counter() - start_apply
+
+            mask_f = mask.float()
+            valid_values = float(mask_f.sum().item())
+            if valid_values > 0:
+                psnr_value = masked_psnr(calibrated, original, mask)
+                sam_value = masked_sam_deg(calibrated, original, mask)
+                if torch.isfinite(psnr_value):
+                    totals["psnr_sum"] += float(psnr_value.item()) * original.shape[0]
+                if torch.isfinite(sam_value):
+                    totals["sam_sum"] += float(sam_value.item()) * original.shape[0]
+                totals["metric_samples"] += int(original.shape[0])
+            totals["samples"] += int(original.shape[0])
+            totals["mse_sum"] += float(((calibrated - original) ** 2 * mask_f).sum().item())
+            totals["mae_sum"] += float(((calibrated - original).abs() * mask_f).sum().item())
+            totals["values"] += valid_values
+
+            for idx, sample_id in enumerate(original_batch["sample_id"]):
+                c, sample_h, sample_w = original_batch["original_shape"][idx]
+                arr = calibrated[idx, :c, :sample_h, :sample_w].detach().cpu().numpy()
+                valid = mask[idx, :c, :sample_h, :sample_w].detach().cpu().numpy().astype(bool)
+                np.savez_compressed(
+                    out_dir / f"{safe_sample_stem(sample_id)}.npz",
+                    data=arr.astype(np.float32),
+                    mask=valid,
+                )
+
+    values = max(totals["values"], 1.0)
+    scale_np = np.asarray(calibration["scale"], dtype=np.float32)
+    offset_np = np.asarray(calibration["offset"], dtype=np.float32)
+    summary = {
+        "name": "per_band_affine_calibration",
+        "variant": variant_name,
+        "source_variant": source_variant,
+        "source_recon_root": str(recon_root),
+        "recon_root": str(calibrated_root),
+        "baseline_type": "train_split_per_band_affine_calibration",
+        "input_modality": modality,
+        "input_normalization": original_normalization,
+        "source_recon_normalization": recon_normalization,
+        "output_channels": int(scale_np.size),
+        "recon_feature_normalization": "none",
+        "saved_reconstruction_normalization": "none",
+        "reconstruction_value_space": f"affine_calibrated_to_{original_normalization}",
+        "samples": totals["samples"],
+        "masked_mse": totals["mse_sum"] / values,
+        "masked_mae": totals["mae_sum"] / values,
+        "masked_psnr": totals["psnr_sum"] / max(totals["metric_samples"], 1),
+        "masked_sam_deg": totals["sam_sum"] / max(totals["metric_samples"], 1),
+        "metric_samples": totals["metric_samples"],
+        "actual_bpppc": None,
+        "actual_bpppc_model_input": None,
+        "actual_cr_16bit": None,
+        "actual_cr_16bit_model_input": None,
+        "calibration_fit_time_sec": fit_time_sec,
+        "encode_time_sec": totals["apply_time_sec"],
+        "decode_time_sec": 0.0,
+        "calibration_sample_count": len(calibration_sample_ids),
+        "calibration_sample_ids": [str(sample_id) for sample_id in calibration_sample_ids],
+        "calibration_eps": calibration["eps"],
+        "scale_mean": float(scale_np.mean()),
+        "scale_std": float(scale_np.std()),
+        "scale_min": float(scale_np.min()),
+        "scale_max": float(scale_np.max()),
+        "offset_mean": float(offset_np.mean()),
+        "offset_std": float(offset_np.std()),
+        "offset_min": float(offset_np.min()),
+        "offset_max": float(offset_np.max()),
+        "adapter_notes": [],
+    }
+    (calibrated_root / "reconstruction_summary.json").write_text(
+        json.dumps(summary, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return calibrated_root, summary
+
+
 def _torch_spectral_gradient(values: torch.Tensor) -> torch.Tensor:
     if values.numel() <= 1:
         return torch.zeros_like(values)

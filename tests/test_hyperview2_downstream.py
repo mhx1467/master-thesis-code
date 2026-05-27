@@ -27,6 +27,7 @@ from hsi_compression.downstream.hyperview2_compression_eval import (
     infer_recon_input_normalization,
     invert_output_spectral_mapping,
     make_feature_matrix,
+    reconstruct_affine_calibrated_reconstruction,
     reconstruct_spectral_resample_passthrough,
 )
 from hsi_compression.downstream.hyperview2_regressors import available_regressor_names
@@ -296,6 +297,57 @@ def test_spectral_resample_passthrough_writes_hyperview2_reconstruction(tmp_path
     assert summary["output_channels"] == 230
     assert summary["samples"] == 2
     assert (recon_root / "train" / "hsi_satellite" / "0001.npz").exists()
+
+
+def test_affine_calibrated_reconstruction_uses_train_ids_only(tmp_path):
+    root = tmp_path / "hyperview2"
+    recon_root = tmp_path / "source_recon" / "HYPERVIEW2"
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
+    (recon_root / "train" / "hsi_satellite").mkdir(parents=True)
+    _write_labels(
+        root / "train_gt.csv",
+        [
+            [1, 1, 2, 3, 4, 5, 6],
+            [2, 2, 3, 4, 5, 6, 7],
+        ],
+    )
+    _write_labels(
+        recon_root / "train_gt.csv",
+        [
+            [1, 1, 2, 3, 4, 5, 6],
+            [2, 2, 3, 4, 5, 6, 7],
+        ],
+    )
+    scale = 0.5
+    offset = 0.1
+    cube_1 = np.linspace(0.1, 0.9, num=230 * 1 * 2, dtype=np.float32).reshape(230, 1, 2)
+    cube_2 = np.linspace(0.2, 0.8, num=230 * 1 * 2, dtype=np.float32).reshape(230, 1, 2)
+    mask = np.ones((1, 2), dtype=bool)
+    for sample_id, cube in [("0001", cube_1), ("0002", cube_2)]:
+        np.savez(root / "train" / "hsi_satellite" / f"{sample_id}.npz", data=cube, mask=mask)
+        recon = ((cube - offset) / scale).astype(np.float32)
+        np.savez(
+            recon_root / "train" / "hsi_satellite" / f"{sample_id}.npz",
+            data=recon,
+            mask=mask,
+        )
+
+    calibrated_root, summary = reconstruct_affine_calibrated_reconstruction(
+        original_root=root,
+        recon_root=recon_root,
+        recon_parent=tmp_path / "calibrated",
+        variant_name="mamba_affine_train_calibrated",
+        calibration_sample_ids=["1"],
+        device=torch.device("cpu"),
+        batch_size=2,
+        num_workers=0,
+    )
+
+    assert summary["baseline_type"] == "train_split_per_band_affine_calibration"
+    assert summary["calibration_sample_count"] == 1
+    assert summary["calibration_sample_ids"] == ["1"]
+    saved = np.load(calibrated_root / "train" / "hsi_satellite" / "0002.npz")
+    np.testing.assert_allclose(saved["data"], cube_2, rtol=1e-5, atol=1e-5)
 
 
 def test_torch_feature_matrix_matches_numpy_feature_matrix(tmp_path):
