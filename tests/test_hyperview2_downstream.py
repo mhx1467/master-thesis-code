@@ -24,6 +24,7 @@ from hsi_compression.downstream.hyperview2 import load_mask, normalize_cube, to_
 from hsi_compression.downstream.hyperview2_compression_eval import (
     apply_input_spectral_mapping,
     build_spectral_mapping,
+    evaluate_downstream_regressors,
     infer_recon_input_normalization,
     invert_output_spectral_mapping,
     make_feature_matrix,
@@ -386,6 +387,40 @@ def test_torch_feature_matrix_matches_numpy_feature_matrix(tmp_path):
     assert ids_torch == ids_numpy
     np.testing.assert_allclose(y_torch, y_numpy)
     np.testing.assert_allclose(x_torch, x_numpy, rtol=1e-6, atol=1e-6)
+
+
+def test_evaluate_downstream_regressors_supports_quick_subset(tmp_path):
+    root = tmp_path / "hyperview2"
+    (root / "train" / "hsi_satellite").mkdir(parents=True)
+    rows = [[idx, idx, idx + 1, idx + 2, idx + 3, idx + 4, idx + 5] for idx in range(8)]
+    _write_labels(root / "train_gt.csv", rows)
+    for idx in range(8):
+        cube = np.full((230, 1, 2), fill_value=idx / 10.0, dtype=np.float32)
+        np.savez(root / "train" / "hsi_satellite" / f"{idx:04d}.npz", data=cube)
+
+    _, _, payload = evaluate_downstream_regressors(
+        hv2_root=root,
+        recon_roots={},
+        recon_feature_normalizations={},
+        model_names=["dummy_mean"],
+        modality="prisma",
+        feature_set="mean_std",
+        original_feature_normalization="none",
+        val_fraction=0.25,
+        seed=42,
+        max_train_samples=3,
+        max_val_samples=2,
+        feature_device=torch.device("cpu"),
+        feature_batch_size=2,
+        feature_num_workers=0,
+    )
+
+    protocol = payload["protocol"]
+    assert protocol["full_train_samples"] == 6
+    assert protocol["full_val_samples"] == 2
+    assert protocol["train_samples"] == 3
+    assert protocol["val_samples"] == 2
+    assert protocol["is_subset_diagnostic"] is True
 
 
 def test_hyperview2_compression_dataset_accepts_singleton_spatial_mask(tmp_path):

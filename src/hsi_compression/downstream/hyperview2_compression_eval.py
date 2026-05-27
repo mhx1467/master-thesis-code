@@ -1317,11 +1317,14 @@ def run_regressors(
     n_jobs: int | None = -1,
     seed: int = 42,
     recon_feature_normalization: str | None = None,
+    verbose: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, Any], list[dict[str, Any]]]:
     rows = []
     details: dict[str, Any] = {}
     prediction_rows: list[dict[str, Any]] = []
     for name in model_names:
+        if verbose:
+            print(f"Regressor: variant={variant} | mode={mode} | model={name}", flush=True)
         start = time.perf_counter()
         row = {
             "variant": variant,
@@ -1380,11 +1383,32 @@ def run_regressors(
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
             row.update(
-                {"status": "failed", "error": str(exc), "fit_time_sec": time.perf_counter() - start}
+                {
+                    "status": "failed",
+                    "error": str(exc),
+                    "hyperview_score": np.nan,
+                    "mean_mse": np.nan,
+                    "mean_mae": np.nan,
+                    "fit_time_sec": time.perf_counter() - start,
+                    "predict_time_sec": np.nan,
+                }
             )
             details[name] = {"status": "failed", "error": str(exc)}
         rows.append(row)
     return pd.DataFrame(rows), details, prediction_rows
+
+
+def _limit_samples(
+    samples: Sequence[Any],
+    max_samples: int | None,
+) -> list[Any]:
+    samples = list(samples)
+    if max_samples is None or max_samples <= 0 or max_samples >= len(samples):
+        return samples
+    # Deterministic spread over the already fixed split. This is a quick-iteration diagnostic,
+    # not a replacement for full HYPERVIEW2 validation.
+    indices = np.linspace(0, len(samples) - 1, num=int(max_samples), dtype=np.int64)
+    return [samples[int(index)] for index in indices]
 
 
 def evaluate_downstream_regressors(
@@ -1401,11 +1425,24 @@ def evaluate_downstream_regressors(
     feature_device: torch.device | None = None,
     feature_batch_size: int = 64,
     feature_num_workers: int = 2,
+    max_train_samples: int | None = None,
+    max_val_samples: int | None = None,
+    verbose: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     original_samples = build_hyperview2_samples(hv2_root, modality=modality, split="train")
-    train_samples, val_samples = split_samples(
+    full_train_samples, full_val_samples = split_samples(
         original_samples, val_fraction=val_fraction, seed=seed
     )
+    train_samples = _limit_samples(full_train_samples, max_train_samples)
+    val_samples = _limit_samples(full_val_samples, max_val_samples)
+    if verbose:
+        print(
+            "Downstream split:",
+            f"train={len(train_samples)}/{len(full_train_samples)}",
+            f"val={len(val_samples)}/{len(full_val_samples)}",
+            f"models={list(model_names)}",
+            flush=True,
+        )
     x_train_orig, y_train, train_ids = make_feature_matrix(
         train_samples,
         modality,
@@ -1444,6 +1481,7 @@ def evaluate_downstream_regressors(
         sample_ids=val_ids,
         n_jobs=n_jobs,
         seed=seed,
+        verbose=verbose,
     )
     all_tables.append(df)
     all_details["original/original_train_to_original_val"] = details
@@ -1486,6 +1524,7 @@ def evaluate_downstream_regressors(
             sample_ids=val_ids,
             n_jobs=n_jobs,
             seed=seed,
+            verbose=verbose,
         )
         all_tables.append(df)
         all_details[f"{variant_name}/original_train_to_recon_val"] = details
@@ -1505,6 +1544,7 @@ def evaluate_downstream_regressors(
             sample_ids=val_ids,
             n_jobs=n_jobs,
             seed=seed,
+            verbose=verbose,
         )
         all_tables.append(df)
         all_details[f"{variant_name}/recon_train_to_recon_val"] = details
@@ -1533,6 +1573,12 @@ def evaluate_downstream_regressors(
         "target_columns": list(HYPERVIEW2_TARGET_COLUMNS),
         "train_samples": len(train_samples),
         "val_samples": len(val_samples),
+        "full_train_samples": len(full_train_samples),
+        "full_val_samples": len(full_val_samples),
+        "max_train_samples": max_train_samples,
+        "max_val_samples": max_val_samples,
+        "is_subset_diagnostic": (len(train_samples) != len(full_train_samples))
+        or (len(val_samples) != len(full_val_samples)),
         "train_sample_ids": train_ids,
         "val_sample_ids": val_ids,
         "model_names": list(model_names),
