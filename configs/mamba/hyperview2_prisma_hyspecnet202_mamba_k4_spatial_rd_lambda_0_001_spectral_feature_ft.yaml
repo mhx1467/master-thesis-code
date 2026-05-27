@@ -15,6 +15,7 @@ data:
   prefetch_factor: 2
   pad_multiple: 4
   min_spatial_size: 4
+  subset_seed: 42
   train_subset_size: null
   val_subset_size: null
 

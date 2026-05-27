@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import random
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +60,74 @@ def _split_main_aux_parameters(model):
 def _load_pretrained_weights(model, checkpoint_path: Path, device: torch.device) -> None:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
+
+
+def _limit_samples(samples, subset_size: int | None, seed: int):
+    samples = list(samples)
+    if subset_size is None:
+        return samples
+    subset_size = int(subset_size)
+    if subset_size <= 0:
+        raise ValueError("subset_size must be positive when provided")
+    if subset_size >= len(samples):
+        return samples
+    indices = list(range(len(samples)))
+    random.Random(seed).shuffle(indices)
+    selected = sorted(indices[:subset_size])
+    return [samples[index] for index in selected]
+
+
+def _compile_regex_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
+    compiled = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern))
+        except re.error as exc:
+            raise ValueError(f"Invalid regex pattern {pattern!r}: {exc}") from exc
+    return compiled
+
+
+def _configure_trainable_parameters(
+    model: torch.nn.Module,
+    *,
+    trainable_regex: list[str],
+    freeze_regex: list[str],
+) -> dict:
+    trainable_patterns = _compile_regex_patterns(trainable_regex)
+    freeze_patterns = _compile_regex_patterns(freeze_regex)
+    trainable_names = []
+    frozen_names = []
+    total_parameters = 0
+    trainable_parameters = 0
+
+    for name, parameter in model.named_parameters():
+        total_parameters += parameter.numel()
+        if trainable_patterns:
+            parameter.requires_grad = any(pattern.search(name) for pattern in trainable_patterns)
+        if freeze_patterns and any(pattern.search(name) for pattern in freeze_patterns):
+            parameter.requires_grad = False
+        if parameter.requires_grad:
+            trainable_names.append(name)
+            trainable_parameters += parameter.numel()
+        else:
+            frozen_names.append(name)
+
+    if not trainable_names:
+        raise ValueError(
+            "No trainable parameters left after applying --trainable-regex/--freeze-regex."
+        )
+
+    return {
+        "trainable_regex": list(trainable_regex),
+        "freeze_regex": list(freeze_regex),
+        "total_parameters": total_parameters,
+        "trainable_parameters": trainable_parameters,
+        "frozen_parameters": total_parameters - trainable_parameters,
+        "trainable_tensors": len(trainable_names),
+        "frozen_tensors": len(frozen_names),
+        "trainable_names_preview": trainable_names[:50],
+        "frozen_names_preview": frozen_names[:50],
+    }
 
 
 def _build_hyperview2_collate(
@@ -147,6 +217,23 @@ def parse_args():
     parser.add_argument("--override-lr", type=float, default=None)
     parser.add_argument("--override-epochs", type=int, default=None)
     parser.add_argument("--override-experiment-name", type=str, default=None)
+    parser.add_argument("--override-train-subset-size", type=int, default=None)
+    parser.add_argument("--override-val-subset-size", type=int, default=None)
+    parser.add_argument(
+        "--trainable-regex",
+        action="append",
+        default=[],
+        help=(
+            "Regex selecting parameters that remain trainable. Repeatable. "
+            "When omitted, all parameters stay trainable unless --freeze-regex matches."
+        ),
+    )
+    parser.add_argument(
+        "--freeze-regex",
+        action="append",
+        default=[],
+        help="Regex selecting parameters to freeze after optional --trainable-regex filtering.",
+    )
     return parser.parse_args()
 
 
@@ -175,7 +262,12 @@ def main() -> None:
         training_cfg["lr"] = args.override_lr
     if args.override_epochs is not None:
         training_cfg["epochs"] = args.override_epochs
+    if args.override_train_subset_size is not None:
+        data_cfg["train_subset_size"] = args.override_train_subset_size
+    if args.override_val_subset_size is not None:
+        data_cfg["val_subset_size"] = args.override_val_subset_size
     cfg["experiment"] = experiment_cfg
+    cfg["data"] = data_cfg
     cfg["training"] = training_cfg
 
     seed = int(experiment_cfg.get("seed", 42))
@@ -211,6 +303,7 @@ def main() -> None:
     min_spatial_size = int(data_cfg.get("min_spatial_size", 4))
     train_subset = data_cfg.get("train_subset_size", None)
     val_subset = data_cfg.get("val_subset_size", None)
+    subset_seed = int(data_cfg.get("subset_seed", seed))
 
     print(f"Device: {device}")
     if device.type == "cuda":
@@ -229,10 +322,8 @@ def main() -> None:
 
     samples = build_hyperview2_samples(hv2_root, modality=modality, split="train")
     train_samples, val_samples = split_samples(samples, val_fraction=val_fraction, seed=seed)
-    if train_subset:
-        train_samples = train_samples[: min(int(train_subset), len(train_samples))]
-    if val_subset:
-        val_samples = val_samples[: min(int(val_subset), len(val_samples))]
+    train_samples = _limit_samples(train_samples, train_subset, seed=subset_seed)
+    val_samples = _limit_samples(val_samples, val_subset, seed=subset_seed + 1)
 
     train_ds = Hyperview2CompressionDataset(
         train_samples,
@@ -314,8 +405,24 @@ def main() -> None:
     if hasattr(model, "update"):
         model.update(force=True)
 
-    n_params = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-    print(f"Model: {model_name} | Parameters: {n_params:,}")
+    trainability = _configure_trainable_parameters(
+        model,
+        trainable_regex=args.trainable_regex,
+        freeze_regex=args.freeze_regex,
+    )
+    n_params = trainability["trainable_parameters"]
+    print(
+        f"Model: {model_name} | Trainable parameters: {n_params:,} / "
+        f"{trainability['total_parameters']:,}"
+    )
+    if args.trainable_regex or args.freeze_regex:
+        print(
+            "Trainability filter: "
+            f"trainable_regex={args.trainable_regex or 'all'} | "
+            f"freeze_regex={args.freeze_regex or 'none'} | "
+            f"trainable_tensors={trainability['trainable_tensors']} | "
+            f"frozen_tensors={trainability['frozen_tensors']}"
+        )
     if device.type == "cuda":
         allocated = torch.cuda.memory_allocated(device) / 1024**3
         reserved = torch.cuda.memory_reserved(device) / 1024**3
@@ -379,6 +486,8 @@ def main() -> None:
         "git_hash": get_git_short_hash(),
         "git_dirty": is_git_dirty(),
         "model_num_params": n_params,
+        "model_total_params": trainability["total_parameters"],
+        "trainability": trainability,
         "device": str(device),
         "cuda_device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
         "amp_enabled": use_amp,
