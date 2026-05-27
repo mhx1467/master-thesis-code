@@ -1,6 +1,8 @@
 import argparse
+import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -20,7 +22,7 @@ from hsi_compression.downstream.hyperview2_compression_eval import (
 from hsi_compression.engine import fit
 from hsi_compression.losses import build_loss
 from hsi_compression.models.registry import build_model
-from hsi_compression.paths import checkpoints_dir, ensure_artifact_dirs
+from hsi_compression.paths import checkpoints_dir, ensure_artifact_dirs, logs_dir
 from hsi_compression.utils import (
     get_git_short_hash,
     is_git_dirty,
@@ -128,6 +130,11 @@ def parse_args():
     parser.add_argument("--pretrained", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--disable-wandb", action="store_true")
+    parser.add_argument(
+        "--require-cuda",
+        action="store_true",
+        help="Fail instead of silently falling back to CPU when CUDA is unavailable.",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--wandb-run-id", type=str, default=None)
     parser.add_argument(
@@ -144,6 +151,12 @@ def parse_args():
 
 
 def main() -> None:
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except AttributeError:
+        pass
+
     load_project_env()
     args = parse_args()
 
@@ -176,7 +189,13 @@ def main() -> None:
         or "data/hyperview2/HYPERVIEW2"
     )
     hv2_root = resolve_hyperview2_root(dataset_root)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cuda_available = torch.cuda.is_available()
+    if args.require_cuda and not cuda_available:
+        print("Error: CUDA is required for this run, but torch.cuda.is_available() is False.")
+        sys.exit(1)
+    device = torch.device("cuda" if cuda_available else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
     use_amp = bool(training_cfg.get("use_amp", True)) and device.type == "cuda"
 
     modality = data_cfg.get("modality", "prisma")
@@ -194,6 +213,12 @@ def main() -> None:
     val_subset = data_cfg.get("val_subset_size", None)
 
     print(f"Device: {device}")
+    if device.type == "cuda":
+        print(f"CUDA device: {torch.cuda.get_device_name(device)}")
+        print(f"CUDA version: {torch.version.cuda}")
+        print(f"cuDNN benchmark: {torch.backends.cudnn.benchmark}")
+    else:
+        print("Warning: running on CPU. This is intended only for small smoke tests.")
     print("Dataset: HYPERVIEW2 downstream fine-tuning protocol, not HySpecNet reference")
     print(f"HYPERVIEW2 root: {hv2_root}")
     print(
@@ -264,6 +289,7 @@ def main() -> None:
         seed=seed,
         collate_fn=collate_fn,
     )
+    print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
 
     model_name = model_cfg.get("model_name")
     model_kwargs = {
@@ -353,6 +379,8 @@ def main() -> None:
         "git_hash": get_git_short_hash(),
         "git_dirty": is_git_dirty(),
         "model_num_params": n_params,
+        "device": str(device),
+        "cuda_device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
         "amp_enabled": use_amp,
         "pretrained": str(args.pretrained) if args.pretrained else None,
     }
@@ -389,9 +417,24 @@ def main() -> None:
             run_id=args.wandb_run_id,
             resume=args.wandb_resume,
         ) as run:
-            _run(logger=run)
+            result = _run(logger=run)
     else:
-        _run(logger=None)
+        result = _run(logger=None)
+
+    summary_path = logs_dir() / f"{exp_name}_train_summary.json"
+    summary_payload = {
+        "experiment_name": exp_name,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "checkpoint_best": str(ckpt_path),
+        "checkpoint_last": str(ckpt_path.parent / f"{exp_name}_last.pt"),
+        "run_config": run_cfg,
+        "best_val_loss": result.get("best_val_loss"),
+        "best_val_ref_psnr": result.get("best_val_ref_psnr"),
+        "history": result.get("history", []),
+    }
+    with summary_path.open("w", encoding="utf-8") as f:
+        json.dump(summary_payload, f, indent=2)
+    print(f"Saved training summary: {summary_path}")
 
 
 if __name__ == "__main__":
