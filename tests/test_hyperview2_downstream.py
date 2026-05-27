@@ -1,4 +1,5 @@
 import csv
+import json
 
 import numpy as np
 import pytest
@@ -20,7 +21,12 @@ from hsi_compression.downstream import (
     hyperview_score,
 )
 from hsi_compression.downstream.hyperview2 import load_mask, normalize_cube, to_chw
-from hsi_compression.downstream.hyperview2_compression_eval import infer_recon_input_normalization
+from hsi_compression.downstream.hyperview2_compression_eval import (
+    apply_input_spectral_mapping,
+    build_spectral_mapping,
+    infer_recon_input_normalization,
+    invert_output_spectral_mapping,
+)
 from hsi_compression.downstream.hyperview2_regressors import available_regressor_names
 
 
@@ -228,6 +234,29 @@ def test_hyperview2_compression_dataset_uses_npz_mask(tmp_path):
     assert item["valid_mask"].shape == (230, 2, 2)
     assert item["valid_mask"][:, 0, 0].all()
     assert not item["valid_mask"][:, 1, 1].any()
+
+
+def test_hyspecnet_202_spectral_mapping_roundtrip_shapes(tmp_path):
+    wavelengths = {f"Band {idx}": float(400 + idx * 9) for idx in range(230)}
+    (tmp_path / "wavelengths.json").write_text(
+        json.dumps({"hsi_satellite_wavelengths": wavelengths}),
+        encoding="utf-8",
+    )
+
+    mapping = build_spectral_mapping("hyspecnet_202_approx", tmp_path, "prisma", 230)
+    x = torch.linspace(0.0, 1.0, steps=230 * 2 * 3).reshape(1, 230, 2, 3)
+    mask = torch.ones_like(x, dtype=torch.bool)
+
+    x_model, mask_model = apply_input_spectral_mapping(x, mask, mapping)
+    x_out = invert_output_spectral_mapping(x_model, mapping)
+
+    assert mapping is not None
+    assert mapping["input_channels"] == 230
+    assert mapping["model_input_channels"] == 202
+    assert x_model.shape == (1, 202, 2, 3)
+    assert mask_model.shape == (1, 202, 2, 3)
+    assert x_out.shape == (1, 230, 2, 3)
+    assert mask_model.all()
 
 
 def test_hyperview2_compression_dataset_accepts_singleton_spatial_mask(tmp_path):

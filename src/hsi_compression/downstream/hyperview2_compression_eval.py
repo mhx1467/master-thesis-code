@@ -16,7 +16,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+from hsi_compression.constants import CLEAN_BAND_COUNT, FULL_BAND_COUNT, WATER_VAPOR_BANDS
 from hsi_compression.downstream.hyperview2 import (
+    HYPERVIEW2_MODALITY_DIRS,
     HYPERVIEW2_TARGET_COLUMNS,
     Hyperview2CompressionDataset,
     Hyperview2FeatureDataset,
@@ -53,6 +55,7 @@ class CompressionCheckpoint:
     pad_multiple: int = 4
     min_spatial_size: int = 4
     allow_in_channel_adapter: bool = True
+    spectral_mapping: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         record = asdict(self)
@@ -170,6 +173,179 @@ def resolve_checkpoint_setting(
     if setting == "checkpoint":
         return checkpoint_data_value(cfg, key=key, fallback=fallback)
     return str(setting)
+
+
+def _hyperview2_wavelength_key(modality: str) -> str:
+    modality_dir = HYPERVIEW2_MODALITY_DIRS.get(modality, modality)
+    if modality_dir == "hsi_satellite":
+        return "hsi_satellite_wavelengths"
+    if modality_dir == "hsi_airborne":
+        return "hsi_aerial_wavelengths"
+    if modality_dir == "msi_satellite":
+        return "msi_satellite_wavelengths"
+    return f"{modality_dir}_wavelengths"
+
+
+def load_hyperview2_wavelengths(
+    source_root: str | Path,
+    modality: str,
+    channels: int,
+) -> np.ndarray:
+    path = Path(source_root) / "wavelengths.json"
+    if not path.exists():
+        return np.linspace(0.0, 1.0, channels, dtype=np.float32)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    values = payload.get(_hyperview2_wavelength_key(modality))
+    if values is None:
+        return np.linspace(0.0, 1.0, channels, dtype=np.float32)
+    if isinstance(values, Mapping):
+        wavelengths = np.asarray(
+            [values[f"Band {idx}"] for idx in range(len(values))],
+            dtype=np.float32,
+        )
+    else:
+        wavelengths = np.asarray(values, dtype=np.float32)
+    if wavelengths.size != channels:
+        raise ValueError(f"Expected {channels} wavelengths for {modality}, got {wavelengths.size}")
+    return wavelengths
+
+
+def build_spectral_mapping(
+    name: str | None,
+    source_root: str | Path,
+    modality: str,
+    input_channels: int,
+) -> dict[str, Any] | None:
+    if name in (None, "", "none"):
+        return None
+    if name != "hyspecnet_202_approx":
+        raise ValueError("spectral_mapping must be one of: none, hyspecnet_202_approx")
+
+    source_wavelengths = load_hyperview2_wavelengths(
+        source_root=source_root,
+        modality=modality,
+        channels=input_channels,
+    )
+    # This diagnostic approximates the HySpecNet/EnMAP 224-band pre-clean grid by spanning the
+    # HYPERVIEW2 PRISMA wavelength range, then applies the repository's 22 invalid-band mask.
+    full_wavelengths = np.linspace(
+        float(source_wavelengths[0]),
+        float(source_wavelengths[-1]),
+        FULL_BAND_COUNT,
+        dtype=np.float32,
+    )
+    clean_indices = np.asarray(
+        [idx for idx in range(FULL_BAND_COUNT) if idx not in set(WATER_VAPOR_BANDS)],
+        dtype=np.int64,
+    )
+    if clean_indices.size != CLEAN_BAND_COUNT:
+        raise RuntimeError(f"Expected {CLEAN_BAND_COUNT} clean bands, got {clean_indices.size}")
+    return {
+        "name": name,
+        "description": (
+            "Approximate HYPERVIEW2 PRISMA 230 -> HySpecNet clean 202 -> PRISMA 230 "
+            "spectral transfer using linear wavelength resampling and repository water-vapor "
+            "band removal indices."
+        ),
+        "input_channels": int(input_channels),
+        "model_input_channels": int(CLEAN_BAND_COUNT),
+        "output_channels": int(input_channels),
+        "source_wavelength_min": float(source_wavelengths[0]),
+        "source_wavelength_max": float(source_wavelengths[-1]),
+        "source_wavelengths": source_wavelengths.astype(float).tolist(),
+        "hyspecnet_full_wavelengths_approx": full_wavelengths.astype(float).tolist(),
+        "clean_indices": clean_indices.astype(int).tolist(),
+        "removed_indices": list(WATER_VAPOR_BANDS),
+    }
+
+
+def _interp_indices(
+    source_positions: Sequence[float],
+    target_positions: Sequence[float],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    source = np.asarray(source_positions, dtype=np.float64)
+    target = np.asarray(target_positions, dtype=np.float64)
+    if source.ndim != 1 or target.ndim != 1:
+        raise ValueError("source_positions and target_positions must be one-dimensional")
+    if source.size < 2:
+        raise ValueError("At least two source positions are required for interpolation")
+    if np.any(np.diff(source) <= 0):
+        raise ValueError("source_positions must be strictly increasing")
+
+    hi = np.searchsorted(source, target, side="left")
+    hi = np.clip(hi, 0, source.size - 1)
+    lo = np.maximum(hi - 1, 0)
+    below = target <= source[0]
+    above = target >= source[-1]
+    lo[below] = 0
+    hi[below] = 0
+    lo[above] = source.size - 1
+    hi[above] = source.size - 1
+
+    denom = source[hi] - source[lo]
+    weights = np.divide(
+        target - source[lo],
+        denom,
+        out=np.zeros_like(target, dtype=np.float64),
+        where=denom != 0,
+    )
+    weights = np.clip(weights, 0.0, 1.0).astype(np.float32)
+    return lo.astype(np.int64), hi.astype(np.int64), weights
+
+
+def resample_spectral_tensor(
+    x: torch.Tensor,
+    source_positions: Sequence[float],
+    target_positions: Sequence[float],
+) -> torch.Tensor:
+    lo, hi, weights = _interp_indices(source_positions, target_positions)
+    lo_t = torch.as_tensor(lo, device=x.device, dtype=torch.long)
+    hi_t = torch.as_tensor(hi, device=x.device, dtype=torch.long)
+    weights_t = torch.as_tensor(weights, device=x.device, dtype=x.dtype).view(1, -1, 1, 1)
+    x_lo = x.index_select(1, lo_t)
+    x_hi = x.index_select(1, hi_t)
+    return x_lo.mul(1.0 - weights_t).add(x_hi.mul(weights_t))
+
+
+def resample_spectral_mask(
+    mask: torch.Tensor,
+    source_positions: Sequence[float],
+    target_positions: Sequence[float],
+) -> torch.Tensor:
+    lo, hi, _ = _interp_indices(source_positions, target_positions)
+    lo_t = torch.as_tensor(lo, device=mask.device, dtype=torch.long)
+    hi_t = torch.as_tensor(hi, device=mask.device, dtype=torch.long)
+    return mask.index_select(1, lo_t) & mask.index_select(1, hi_t)
+
+
+def apply_input_spectral_mapping(
+    x: torch.Tensor,
+    mask: torch.Tensor,
+    mapping: Mapping[str, Any] | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if mapping is None:
+        return x, mask
+    source_wavelengths = mapping["source_wavelengths"]
+    full_wavelengths = mapping["hyspecnet_full_wavelengths_approx"]
+    clean_indices = torch.as_tensor(mapping["clean_indices"], device=x.device, dtype=torch.long)
+    x_full = resample_spectral_tensor(x, source_wavelengths, full_wavelengths)
+    mask_full = resample_spectral_mask(mask, source_wavelengths, full_wavelengths)
+    return x_full.index_select(1, clean_indices), mask_full.index_select(1, clean_indices)
+
+
+def invert_output_spectral_mapping(
+    x: torch.Tensor,
+    mapping: Mapping[str, Any] | None,
+) -> torch.Tensor:
+    if mapping is None:
+        return x
+    full_wavelengths = mapping["hyspecnet_full_wavelengths_approx"]
+    clean_indices = np.asarray(mapping["clean_indices"], dtype=np.int64)
+    clean_wavelengths = np.asarray(full_wavelengths, dtype=np.float32)[clean_indices]
+    source_wavelengths = mapping["source_wavelengths"]
+    x_full = resample_spectral_tensor(x, clean_wavelengths, full_wavelengths)
+    return resample_spectral_tensor(x_full, full_wavelengths, source_wavelengths)
 
 
 def resize_tensor_along_dim(tensor: torch.Tensor, target_size: int, dim: int) -> torch.Tensor:
@@ -323,7 +499,18 @@ def reconstruct_checkpoint(
         ),
     )
     first = dataset[0]
-    in_channels = int(first["x"].shape[0])
+    input_channels = int(first["x"].shape[0])
+    spectral_mapping = build_spectral_mapping(
+        checkpoint.spectral_mapping,
+        source_root=source_root,
+        modality=checkpoint.modality,
+        input_channels=input_channels,
+    )
+    in_channels = (
+        int(spectral_mapping["model_input_channels"])
+        if spectral_mapping is not None
+        else input_channels
+    )
     model, cfg, adapter_notes = build_model_from_checkpoint(
         checkpoint_path,
         in_channels=in_channels,
@@ -346,6 +533,7 @@ def reconstruct_checkpoint(
         "metric_samples": 0,
         "actual_bits": 0.0,
         "coded_values": 0.0,
+        "model_input_coded_values": 0.0,
         "encode_time_sec": 0.0,
         "decode_time_sec": 0.0,
     }
@@ -354,23 +542,27 @@ def reconstruct_checkpoint(
         for batch in tqdm(loader, desc=f"reconstruct:{variant_name}:{split}"):
             x = batch["x"].to(device, non_blocking=True)
             mask = batch["valid_mask"].to(device, non_blocking=True)
+            x_model, mask_model = apply_input_spectral_mapping(x, mask, spectral_mapping)
             start_encode = time.perf_counter()
             if (
                 checkpoint.use_bitstream
                 and hasattr(model, "compress")
                 and hasattr(model, "decompress")
             ):
-                packed = call_model_compress(model, x, mask)
+                packed = call_model_compress(model, x_model, mask_model)
                 encode_time = time.perf_counter() - start_encode
                 start_decode = time.perf_counter()
                 decoded = call_model_decompress(model, packed)
                 decode_time = time.perf_counter() - start_decode
-                x_hat = decoded["x_hat"] if isinstance(decoded, dict) else decoded
+                x_hat_model = decoded["x_hat"] if isinstance(decoded, dict) else decoded
                 if isinstance(packed, Mapping) and packed.get("strings") is not None:
                     try:
                         totals["actual_bits"] += float(sum_string_bytes(packed["strings"]) * 8)
                         totals["coded_values"] += float(
                             sum(c * h * w for c, h, w in batch["original_shape"])
+                        )
+                        totals["model_input_coded_values"] += float(
+                            sum(x_model.shape[1] * h * w for _, h, w in batch["original_shape"])
                         )
                     except Exception as exc:  # pragma: no cover - diagnostic path
                         print("actual_bpppc skipped:", exc)
@@ -379,11 +571,12 @@ def reconstruct_checkpoint(
                     device_type=device.type,
                     enabled=use_amp and device.type == "cuda",
                 ):
-                    outputs = call_model_forward(model, x, mask)
+                    outputs = call_model_forward(model, x_model, mask_model)
                 encode_time = time.perf_counter() - start_encode
                 decode_time = 0.0
-                x_hat = outputs["x_hat"] if isinstance(outputs, dict) else outputs
+                x_hat_model = outputs["x_hat"] if isinstance(outputs, dict) else outputs
 
+            x_hat = invert_output_spectral_mapping(x_hat_model.float(), spectral_mapping)
             x_hat = x_hat.float().clamp(0.0, 1.0)
             totals["encode_time_sec"] += encode_time
             totals["decode_time_sec"] += decode_time
@@ -413,8 +606,11 @@ def reconstruct_checkpoint(
 
     values = max(totals["values"], 1.0)
     actual_bpppc = None
+    actual_bpppc_model_input = None
     if totals["coded_values"] > 0:
         actual_bpppc = totals["actual_bits"] / totals["coded_values"]
+    if totals["model_input_coded_values"] > 0:
+        actual_bpppc_model_input = totals["actual_bits"] / totals["model_input_coded_values"]
     summary = {
         "name": checkpoint.name,
         "variant": variant_name,
@@ -422,6 +618,9 @@ def reconstruct_checkpoint(
         "recon_root": str(recon_root),
         "input_modality": checkpoint.modality,
         "input_normalization": resolved_normalization,
+        "input_channels": input_channels,
+        "model_input_channels": in_channels,
+        "output_channels": input_channels,
         "recon_feature_normalization": checkpoint.recon_feature_normalization,
         "saved_reconstruction_normalization": "none",
         "reconstruction_value_space": f"model_output_for_{resolved_normalization}_input",
@@ -432,11 +631,16 @@ def reconstruct_checkpoint(
         "masked_sam_deg": totals["sam_sum"] / max(totals["metric_samples"], 1),
         "metric_samples": totals["metric_samples"],
         "actual_bpppc": actual_bpppc,
+        "actual_bpppc_model_input": actual_bpppc_model_input,
         "actual_cr_16bit": compute_compression_ratio_from_bpppc(actual_bpppc),
+        "actual_cr_16bit_model_input": compute_compression_ratio_from_bpppc(
+            actual_bpppc_model_input
+        ),
         "encode_time_sec": totals["encode_time_sec"],
         "decode_time_sec": totals["decode_time_sec"],
         "checkpoint_config": cfg,
         "adapter_notes": adapter_notes,
+        "spectral_mapping": spectral_mapping,
     }
     (recon_root / "reconstruction_summary.json").write_text(
         json.dumps(summary, indent=2, default=str),
@@ -870,16 +1074,16 @@ def compute_per_band_diagnostics(
     sample_ids: Sequence[str],
     original_normalization: str,
     max_samples: int | None = None,
+    n_bands: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if max_samples is not None:
         sample_ids = list(sample_ids)[:max_samples]
-    n_bands = 230
-    abs_sum = np.zeros(n_bands, dtype=np.float64)
-    sq_sum = np.zeros(n_bands, dtype=np.float64)
-    bias_sum = np.zeros(n_bands, dtype=np.float64)
-    orig_sum = np.zeros(n_bands, dtype=np.float64)
-    recon_sum = np.zeros(n_bands, dtype=np.float64)
-    counts = np.zeros(n_bands, dtype=np.float64)
+    abs_sum: np.ndarray | None = None
+    sq_sum: np.ndarray | None = None
+    bias_sum: np.ndarray | None = None
+    orig_sum: np.ndarray | None = None
+    recon_sum: np.ndarray | None = None
+    counts: np.ndarray | None = None
     sample_rows = []
 
     for sample_id in tqdm(sample_ids, desc=f"per-band:{Path(recon_root).parent.name}"):
@@ -890,6 +1094,17 @@ def compute_per_band_diagnostics(
         orig, orig_mask = load_cube_and_value_mask(orig_path)
         recon, recon_mask = load_cube_and_value_mask(recon_path)
         orig = normalize_original_cube(orig, orig_mask, original_normalization)
+        if n_bands is None and abs_sum is None:
+            n_bands = min(orig.shape[0], recon.shape[0])
+        elif n_bands is None:
+            n_bands = int(abs_sum.shape[0])
+        if abs_sum is None:
+            abs_sum = np.zeros(n_bands, dtype=np.float64)
+            sq_sum = np.zeros(n_bands, dtype=np.float64)
+            bias_sum = np.zeros(n_bands, dtype=np.float64)
+            orig_sum = np.zeros(n_bands, dtype=np.float64)
+            recon_sum = np.zeros(n_bands, dtype=np.float64)
+            counts = np.zeros(n_bands, dtype=np.float64)
         c = min(orig.shape[0], recon.shape[0], n_bands)
         h = min(orig.shape[-2], recon.shape[-2])
         w = min(orig.shape[-1], recon.shape[-1])
@@ -903,6 +1118,12 @@ def compute_per_band_diagnostics(
             continue
         diff = recon - orig
         valid_f = valid.astype(np.float32)
+        assert abs_sum is not None
+        assert sq_sum is not None
+        assert bias_sum is not None
+        assert orig_sum is not None
+        assert recon_sum is not None
+        assert counts is not None
         abs_sum[:c] += (np.abs(diff) * valid_f).sum(axis=(1, 2))
         sq_sum[:c] += ((diff**2) * valid_f).sum(axis=(1, 2))
         bias_sum[:c] += (diff * valid_f).sum(axis=(1, 2))
@@ -919,6 +1140,15 @@ def compute_per_band_diagnostics(
             }
         )
 
+    if n_bands is None:
+        n_bands = 0
+    if abs_sum is None:
+        abs_sum = np.zeros(n_bands, dtype=np.float64)
+        sq_sum = np.zeros(n_bands, dtype=np.float64)
+        bias_sum = np.zeros(n_bands, dtype=np.float64)
+        orig_sum = np.zeros(n_bands, dtype=np.float64)
+        recon_sum = np.zeros(n_bands, dtype=np.float64)
+        counts = np.zeros(n_bands, dtype=np.float64)
     per_band = pd.DataFrame(
         {
             "band": np.arange(n_bands),
