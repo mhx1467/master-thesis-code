@@ -31,13 +31,14 @@ from hsi_compression.downstream.hyperview2 import (
     split_samples,
 )
 from hsi_compression.downstream.hyperview2_regressors import build_hyperview2_regressor
-from hsi_compression.engine.checkpointing import load_checkpoint
 from hsi_compression.metrics import (
     compute_compression_ratio_from_bpppc,
     masked_psnr,
     masked_sam_deg,
 )
 from hsi_compression.models.registry import build_model
+
+_ENTROPY_RUNTIME_BUFFER_SUFFIXES = ("_offset", "_quantized_cdf", "_cdf_length")
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,39 @@ def sum_string_bytes(obj: Any) -> int:
 def read_checkpoint_config(checkpoint_path: str | Path) -> dict[str, Any]:
     raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     return raw.get("config", {})
+
+
+def _is_entropy_runtime_buffer(key: str) -> bool:
+    return key.endswith(_ENTROPY_RUNTIME_BUFFER_SUFFIXES)
+
+
+def _load_state_dict_allowing_entropy_runtime_buffers(
+    model: torch.nn.Module,
+    state_dict: Mapping[str, torch.Tensor],
+) -> list[str]:
+    target_state = model.state_dict()
+    filtered: dict[str, torch.Tensor] = {}
+    skipped: list[str] = []
+    for key, value in state_dict.items():
+        target = target_state.get(key)
+        if (
+            target is not None
+            and _is_entropy_runtime_buffer(key)
+            and tuple(value.shape) != tuple(target.shape)
+        ):
+            skipped.append(key)
+            continue
+        filtered[key] = value
+
+    missing, unexpected = model.load_state_dict(filtered, strict=False)
+    invalid_missing = [
+        key for key in missing if key not in skipped and not _is_entropy_runtime_buffer(key)
+    ]
+    if invalid_missing:
+        raise RuntimeError(f"Missing keys while loading checkpoint: {invalid_missing[:20]}")
+    if unexpected:
+        raise RuntimeError(f"Unexpected keys while loading checkpoint: {unexpected[:20]}")
+    return skipped
 
 
 def checkpoint_data_value(cfg: Mapping[str, Any], key: str, fallback: str) -> str:
@@ -391,6 +425,8 @@ def adapt_hyspecnet_202_state_dict_to_hyperview2(
         if tuple(value.shape) == tuple(target.shape):
             adapted[key] = value
             continue
+        if _is_entropy_runtime_buffer(key):
+            continue
         if key not in resize_rules:
             raise RuntimeError(
                 f"Unexpected checkpoint shape mismatch for {key}: "
@@ -428,6 +464,7 @@ def build_model_from_checkpoint(
     model_kwargs.pop("in_channels", None)
     model = build_model(model_name, in_channels=in_channels, **model_kwargs).to(device)
     adapter_notes: list[str] = []
+    state_dict = raw["model_state_dict"]
 
     if checkpoint_in_channels != in_channels:
         if not allow_in_channel_adapter:
@@ -436,16 +473,16 @@ def build_model_from_checkpoint(
                 "Enable allow_in_channel_adapter only for documented diagnostic transfer."
             )
         adapted_state, adapter_notes = adapt_hyspecnet_202_state_dict_to_hyperview2(
-            raw["model_state_dict"],
+            state_dict,
             model,
         )
-        missing, unexpected = model.load_state_dict(adapted_state, strict=False)
-        if unexpected:
-            raise RuntimeError(f"Unexpected keys while loading adapted checkpoint: {unexpected}")
-        if missing:
-            raise RuntimeError(f"Missing keys while loading adapted checkpoint: {missing[:20]}")
+        skipped = _load_state_dict_allowing_entropy_runtime_buffers(model, adapted_state)
     else:
-        load_checkpoint(checkpoint_path, model=model, optimizer=None, map_location=device)
+        skipped = _load_state_dict_allowing_entropy_runtime_buffers(model, state_dict)
+    if skipped:
+        adapter_notes.append(
+            "ignored entropy runtime buffers restored by model.update(): " + ", ".join(skipped)
+        )
 
     if hasattr(model, "update"):
         model.update(force=True)

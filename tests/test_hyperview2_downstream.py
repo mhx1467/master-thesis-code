@@ -22,6 +22,7 @@ from hsi_compression.downstream import (
 )
 from hsi_compression.downstream.hyperview2 import load_mask, normalize_cube, to_chw
 from hsi_compression.downstream.hyperview2_compression_eval import (
+    _load_state_dict_allowing_entropy_runtime_buffers,
     apply_input_spectral_mapping,
     build_spectral_mapping,
     evaluate_downstream_regressors,
@@ -421,6 +422,39 @@ def test_evaluate_downstream_regressors_supports_quick_subset(tmp_path):
     assert protocol["train_samples"] == 3
     assert protocol["val_samples"] == 2
     assert protocol["is_subset_diagnostic"] is True
+
+
+def test_checkpoint_loader_skips_entropy_runtime_buffers_with_shape_mismatch():
+    class TinyEntropy(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("_offset", torch.empty(0, dtype=torch.int32))
+            self.register_buffer("_quantized_cdf", torch.empty(0, dtype=torch.int32))
+            self.register_buffer("_cdf_length", torch.empty(0, dtype=torch.int32))
+
+    class TinyCodec(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.entropy_bottleneck = TinyEntropy()
+            self.linear = torch.nn.Linear(2, 1)
+
+    model = TinyCodec()
+    state = model.state_dict()
+    state["linear.weight"] = torch.ones_like(state["linear.weight"])
+    state["linear.bias"] = torch.ones_like(state["linear.bias"])
+    state["entropy_bottleneck._offset"] = torch.ones(2, dtype=torch.int32)
+    state["entropy_bottleneck._quantized_cdf"] = torch.ones(2, 8, dtype=torch.int32)
+    state["entropy_bottleneck._cdf_length"] = torch.ones(2, dtype=torch.int32)
+
+    skipped = _load_state_dict_allowing_entropy_runtime_buffers(model, state)
+
+    assert sorted(skipped) == [
+        "entropy_bottleneck._cdf_length",
+        "entropy_bottleneck._offset",
+        "entropy_bottleneck._quantized_cdf",
+    ]
+    assert torch.equal(model.linear.weight, torch.ones_like(model.linear.weight))
+    assert model.entropy_bottleneck._offset.numel() == 0
 
 
 def test_hyperview2_compression_dataset_accepts_singleton_spatial_mask(tmp_path):
