@@ -82,6 +82,8 @@ def _call_model_decompress(model, packed, mask):
     }
     if "z_shape" in packed and packed["z_shape"] is not None:
         kwargs["z_shape"] = packed["z_shape"]
+    if "output_channels" in packed and packed["output_channels"] is not None:
+        kwargs["output_channels"] = packed["output_channels"]
 
     _ = mask
     return model.decompress(**kwargs)

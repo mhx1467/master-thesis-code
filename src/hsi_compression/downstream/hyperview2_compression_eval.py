@@ -118,26 +118,56 @@ def read_reconstruction_summary(recon_root: str | Path) -> dict[str, Any] | None
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def call_model_forward(model: torch.nn.Module, x: torch.Tensor, mask: torch.Tensor) -> Any:
+def call_model_forward(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    mask: torch.Tensor,
+    wavelengths: Sequence[float] | None = None,
+    output_wavelengths: Sequence[float] | None = None,
+) -> Any:
     try:
-        return model(x, valid_mask=mask)
+        return model(
+            x,
+            valid_mask=mask,
+            wavelengths=wavelengths,
+            output_wavelengths=output_wavelengths,
+        )
     except TypeError:
-        return model(x)
+        try:
+            return model(x, valid_mask=mask)
+        except TypeError:
+            return model(x)
 
 
-def call_model_compress(model: torch.nn.Module, x: torch.Tensor, mask: torch.Tensor) -> Any:
+def call_model_compress(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    mask: torch.Tensor,
+    wavelengths: Sequence[float] | None = None,
+) -> Any:
     try:
-        return model.compress(x, valid_mask=mask)
+        return model.compress(x, valid_mask=mask, wavelengths=wavelengths)
     except TypeError:
-        return model.compress(x)
+        try:
+            return model.compress(x, valid_mask=mask)
+        except TypeError:
+            return model.compress(x)
 
 
-def call_model_decompress(model: torch.nn.Module, packed: Mapping[str, Any]) -> Any:
+def call_model_decompress(
+    model: torch.nn.Module,
+    packed: Mapping[str, Any],
+    output_wavelengths: Sequence[float] | None = None,
+) -> Any:
     if "latent" in packed:
         return model.decompress(latent=packed["latent"], z_shape=packed.get("z_shape"))
     kwargs = {"strings": packed["strings"], "shape": packed["shape"]}
     if packed.get("z_shape") is not None:
         kwargs["z_shape"] = packed["z_shape"]
+    if packed.get("output_channels") is not None:
+        kwargs["output_channels"] = packed["output_channels"]
+    if output_wavelengths is not None:
+        kwargs["output_wavelengths"] = output_wavelengths
     return model.decompress(**kwargs)
 
 
@@ -382,6 +412,27 @@ def invert_output_spectral_mapping(
     return resample_spectral_tensor(x_full, full_wavelengths, source_wavelengths)
 
 
+def model_input_wavelengths_for_mapping(
+    mapping: Mapping[str, Any] | None,
+    source_root: str | Path,
+    modality: str,
+    input_channels: int,
+) -> list[float]:
+    if mapping is None:
+        return (
+            load_hyperview2_wavelengths(
+                source_root=source_root,
+                modality=modality,
+                channels=input_channels,
+            )
+            .astype(float)
+            .tolist()
+        )
+    full_wavelengths = np.asarray(mapping["hyspecnet_full_wavelengths_approx"], dtype=np.float32)
+    clean_indices = np.asarray(mapping["clean_indices"], dtype=np.int64)
+    return full_wavelengths[clean_indices].astype(float).tolist()
+
+
 def resize_tensor_along_dim(tensor: torch.Tensor, target_size: int, dim: int) -> torch.Tensor:
     if tensor.shape[dim] == target_size:
         return tensor
@@ -549,6 +600,12 @@ def reconstruct_checkpoint(
         if spectral_mapping is not None
         else input_channels
     )
+    model_input_wavelengths = model_input_wavelengths_for_mapping(
+        spectral_mapping,
+        source_root=source_root,
+        modality=checkpoint.modality,
+        input_channels=input_channels,
+    )
     model, cfg, adapter_notes = build_model_from_checkpoint(
         checkpoint_path,
         in_channels=in_channels,
@@ -587,10 +644,14 @@ def reconstruct_checkpoint(
                 and hasattr(model, "compress")
                 and hasattr(model, "decompress")
             ):
-                packed = call_model_compress(model, x_model, mask_model)
+                packed = call_model_compress(
+                    model, x_model, mask_model, wavelengths=model_input_wavelengths
+                )
                 encode_time = time.perf_counter() - start_encode
                 start_decode = time.perf_counter()
-                decoded = call_model_decompress(model, packed)
+                decoded = call_model_decompress(
+                    model, packed, output_wavelengths=model_input_wavelengths
+                )
                 decode_time = time.perf_counter() - start_decode
                 x_hat_model = decoded["x_hat"] if isinstance(decoded, dict) else decoded
                 if isinstance(packed, Mapping) and packed.get("strings") is not None:
@@ -609,7 +670,13 @@ def reconstruct_checkpoint(
                     device_type=device.type,
                     enabled=use_amp and device.type == "cuda",
                 ):
-                    outputs = call_model_forward(model, x_model, mask_model)
+                    outputs = call_model_forward(
+                        model,
+                        x_model,
+                        mask_model,
+                        wavelengths=model_input_wavelengths,
+                        output_wavelengths=model_input_wavelengths,
+                    )
                 encode_time = time.perf_counter() - start_encode
                 decode_time = 0.0
                 x_hat_model = outputs["x_hat"] if isinstance(outputs, dict) else outputs

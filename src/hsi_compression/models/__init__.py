@@ -5,6 +5,7 @@ __all__ = [
     "Baseline2DAutoencoder",
     "Baseline3DPatchAutoencoder",
     "HierarchicalSpectralMambaAutoencoder",
+    "HierarchicalSpectralMambaSensorAwareAutoencoder",
     "Hybrid2D3DAutoencoderLIC",
     "SpectralTCNLossless",
     "SpectralMambaAutoencoder",
@@ -29,6 +30,12 @@ def __getattr__(name: str):
         from .hierarchical_spectral_mamba_ae import HierarchicalSpectralMambaAutoencoder
 
         return HierarchicalSpectralMambaAutoencoder
+    if name == "HierarchicalSpectralMambaSensorAwareAutoencoder":
+        from .hierarchical_spectral_mamba_sensor_aware import (
+            HierarchicalSpectralMambaSensorAwareAutoencoder,
+        )
+
+        return HierarchicalSpectralMambaSensorAwareAutoencoder
     if name == "Hybrid2D3DAutoencoderLIC":
         from .hybrid_2d3d_ae_lic import Hybrid2D3DAutoencoderLIC
 
