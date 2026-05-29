@@ -233,7 +233,7 @@ def masked_sid(
     return sid_val[pixel_mask].mean()
 
 
-def _sum_string_bytes(obj) -> int:
+def sum_string_bytes(obj) -> int:
     """
     Recursively sum byte lengths for CompressAI-style bitstream containers.
 
@@ -251,7 +251,7 @@ def _sum_string_bytes(obj) -> int:
         # compressai can return nested lists when multiple streams are produced.
         total = 0
         for item in obj:
-            total += _sum_string_bytes(item)
+            total += sum_string_bytes(item)
         return total
 
     raise TypeError(f"Unsupported strings container type: {type(obj)!r}")
@@ -269,7 +269,7 @@ def compute_actual_bpppc_from_strings(
     if strings is None:
         raise ValueError("strings must not be None")
 
-    total_bytes = _sum_string_bytes(strings)
+    total_bytes = sum_string_bytes(strings)
     total_bits = total_bytes * 8
 
     if len(original_shape) != 4:

@@ -27,6 +27,7 @@ from hsi_compression.metrics import (
     sam_deg,
     sid,
     ssim,
+    sum_string_bytes,
 )
 
 
@@ -198,6 +199,12 @@ def test_compute_actual_bpppc_from_strings_counts_nested_bitstreams():
     strings = [[b"ab", b""], (bytearray(b"cde"), [b"f"])]
 
     assert compute_actual_bpppc_from_strings(strings, (1, 3, 2, 1)) == pytest.approx(8.0)
+
+
+def test_sum_string_bytes_counts_nested_bitstreams():
+    strings = [[b"ab"], (bytearray(b"cde"), [b"f"])]
+
+    assert sum_string_bytes(strings) == 6
 
 
 def test_compute_actual_bpppc_from_strings_rejects_invalid_inputs():

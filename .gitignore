@@ -8,6 +8,7 @@ __pycache__/
 venv/
 .env
 .pytest_cache/
+.ruff_cache/
 artifacts/
 dist/
 build/
@@ -17,5 +18,4 @@ wandb/
 configs/vms.yaml
 dataset/
 data/
-docs/
 summaries/

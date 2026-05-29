@@ -97,11 +97,7 @@ def _has_module(module_name: str) -> bool:
 def available_regressor_names(include_unavailable: bool = False) -> list[str]:
     if include_unavailable:
         return list(REGRESSOR_SPECS)
-    return [
-        name
-        for name, spec in REGRESSOR_SPECS.items()
-        if _has_module(spec.dependency)
-    ]
+    return [name for name, spec in REGRESSOR_SPECS.items() if _has_module(spec.dependency)]
 
 
 def _require_sklearn() -> dict[str, Any]:

@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 
 from hsi_compression.data import build_dataset
 from hsi_compression.engine.checkpointing import load_checkpoint
+from hsi_compression.engine.model_io import call_model_forward
 from hsi_compression.metrics import masked_mae, masked_psnr, masked_sam_deg, ref_ssim
 from hsi_compression.models.registry import build_model
 from hsi_compression.utils import load_project_env
@@ -77,10 +78,7 @@ def _selected_indices(dataset_len: int, value: str | None) -> list[int]:
 
 
 def _call_model_forward(model: torch.nn.Module, x: torch.Tensor, mask: torch.Tensor | None) -> dict:
-    try:
-        outputs = model(x, valid_mask=mask)
-    except TypeError:
-        outputs = model(x)
+    outputs = call_model_forward(model, x, mask)
     if not isinstance(outputs, dict) or "x_hat" not in outputs:
         raise RuntimeError("Model output must be a dict containing 'x_hat'.")
     return outputs

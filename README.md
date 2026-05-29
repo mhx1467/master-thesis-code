@@ -35,10 +35,10 @@ Optional dependency groups:
 ## Setup
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -e '.[dev]'
+make install-dev
 ```
 
 Install optional extras when needed:
@@ -140,7 +140,8 @@ scripts/audit_lossless_tcn_protocol.py            audit lossless TCN protocol
 ```bash
 make lint
 make check-format
-pytest
+make test
+make quality
 ```
 
 Apply formatting:
@@ -148,6 +149,10 @@ Apply formatting:
 ```bash
 make format
 ```
+
+See `docs/development.md` for repository conventions, commit message format, and
+notebook maintainability rules. See `notebooks/README.md` before adding or
+copying Colab notebooks.
 
 ## Notes
 

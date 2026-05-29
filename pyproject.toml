@@ -38,6 +38,7 @@ downstream-boosting = [
     "xgboost>=2.0",
 ]
 dev = [
+    "pytest>=8.0",
     "ruff>=0.2.1",
 ]
 

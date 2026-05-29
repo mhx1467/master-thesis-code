@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 
 from hsi_compression.data import build_dataset
 from hsi_compression.engine.checkpointing import load_checkpoint
+from hsi_compression.engine.model_io import call_model_forward
 from hsi_compression.metrics import (
     masked_mae,
     masked_mse,
@@ -146,10 +147,7 @@ def _parse_checkpoints(values: list[str] | None) -> list[CheckpointSpec]:
 
 
 def _call_model_forward(model: torch.nn.Module, x: torch.Tensor, mask: torch.Tensor | None) -> dict:
-    try:
-        outputs = model(x, valid_mask=mask)
-    except TypeError:
-        outputs = model(x)
+    outputs = call_model_forward(model, x, mask)
     if not isinstance(outputs, dict) or "x_hat" not in outputs:
         raise RuntimeError("Model output must be a dict containing 'x_hat'.")
     return outputs

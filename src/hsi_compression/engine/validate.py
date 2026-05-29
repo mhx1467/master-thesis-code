@@ -3,6 +3,14 @@ import time
 import torch
 from tqdm.auto import tqdm
 
+from hsi_compression.engine.model_io import (
+    call_model_compress,
+    call_model_decompress,
+    exact_reconstruction_target,
+    model_proxy_bpppc,
+    supports_actual_compression,
+    validate_packed_output,
+)
 from hsi_compression.metrics import (
     compute_actual_bpppc_from_strings,
     compute_compression_ratio_from_bpppc,
@@ -37,50 +45,6 @@ def _model_kwargs_from_batch(batch: dict, device: torch.device) -> dict:
     return kwargs
 
 
-def _call_model_compress(
-    model,
-    x: torch.Tensor,
-    mask: torch.Tensor | None,
-    wavelengths=None,
-):
-    # newer models accept masks during compression, older baselines do not.
-    try:
-        return model.compress(x, valid_mask=mask, wavelengths=wavelengths)
-    except TypeError:
-        try:
-            return model.compress(x, valid_mask=mask)
-        except TypeError:
-            return model.compress(x)
-
-
-def _call_model_decompress(model, packed: dict, output_wavelengths=None):
-    kwargs = {"strings": packed["strings"], "shape": packed["shape"]}
-    if "z_shape" in packed and packed["z_shape"] is not None:
-        kwargs["z_shape"] = packed["z_shape"]
-    if "output_channels" in packed and packed["output_channels"] is not None:
-        kwargs["output_channels"] = packed["output_channels"]
-    if output_wavelengths is not None:
-        kwargs["output_wavelengths"] = output_wavelengths
-    try:
-        return model.decompress(**kwargs)
-    except TypeError:
-        kwargs.pop("output_wavelengths", None)
-        return model.decompress(**kwargs)
-
-
-def _supports_actual_compression(model) -> bool:
-    model_raw = model.module if hasattr(model, "module") else model
-    return bool(getattr(model_raw, "supports_actual_compression", False))
-
-
-def _exact_reconstruction_target(model, x: torch.Tensor) -> torch.Tensor:
-    model_raw = model.module if hasattr(model, "module") else model
-    target_fn = getattr(model_raw, "exact_reconstruction_target", None)
-    if callable(target_fn):
-        return target_fn(x)
-    return x
-
-
 @torch.no_grad()
 def validate_one_epoch(
     model,
@@ -95,15 +59,6 @@ def validate_one_epoch(
     actual_codec_eval_batches: int = 0,
 ):
     model.eval()
-
-    def _get_proxy_bpppc(model_obj) -> float | None:
-        model_raw = model_obj.module if hasattr(model_obj, "module") else model_obj
-        # proxy bitrate is only a diagnostic when no bitstream has been measured
-        proxy = getattr(model_raw, "proxy_bpppc", None)
-        if proxy is not None:
-            return float(proxy)
-        legacy = getattr(model_raw, "bpppc", None)
-        return float(legacy) if legacy is not None else None
 
     totals = {
         "loss": 0.0,
@@ -133,7 +88,7 @@ def validate_one_epoch(
     encode_times_ms = []
     decode_times_ms = []
     start_time = time.perf_counter()
-    run_actual_codec = actual_codec_eval_batches > 0 and _supports_actual_compression(model)
+    run_actual_codec = actual_codec_eval_batches > 0 and supports_actual_compression(model)
 
     use_progress = show_progress and is_main_process()
     desc = f"Val {epoch}/{total_epochs}" + ("" if compute_sam else " (fast)")
@@ -236,17 +191,17 @@ def validate_one_epoch(
                 has_likelihoods = True
                 totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
 
-        model_proxy_bpppc = _get_proxy_bpppc(model)
-        if model_proxy_bpppc is not None:
+        model_proxy = model_proxy_bpppc(model)
+        if model_proxy is not None:
             # proxy and ref fields are kept equal until an actual bitstream is measured.
-            totals["proxy_bpppc"] += model_proxy_bpppc
-            totals["ref_bpppc"] += model_proxy_bpppc
+            totals["proxy_bpppc"] += model_proxy
+            totals["ref_bpppc"] += model_proxy
 
         if run_actual_codec and actual_batches < actual_codec_eval_batches:
             if device.type == "cuda":
                 torch.cuda.synchronize()
             encode_start = time.perf_counter()
-            packed = _call_model_compress(
+            packed = call_model_compress(
                 model,
                 x,
                 mask,
@@ -256,8 +211,7 @@ def validate_one_epoch(
                 torch.cuda.synchronize()
             encode_times_ms.append((time.perf_counter() - encode_start) * 1000.0)
 
-            if not isinstance(packed, dict) or "strings" not in packed or "shape" not in packed:
-                raise RuntimeError("model.compress() must return strings and shape")
+            validate_packed_output(packed)
 
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -265,7 +219,7 @@ def validate_one_epoch(
             output_wavelengths = model_kwargs.get("output_wavelengths")
             if output_wavelengths is None:
                 output_wavelengths = model_kwargs.get("wavelengths")
-            decoded = _call_model_decompress(
+            decoded = call_model_decompress(
                 model,
                 packed,
                 output_wavelengths=output_wavelengths,
@@ -278,7 +232,7 @@ def validate_one_epoch(
                 raise RuntimeError("model.decompress() must return a dict containing 'x_hat'")
 
             x_hat_actual = decoded["x_hat"].to(device=device, dtype=x.dtype)
-            exact_target = _exact_reconstruction_target(model, x).to(device=device, dtype=x.dtype)
+            exact_target = exact_reconstruction_target(model, x).to(device=device, dtype=x.dtype)
             actual_mismatch_count += int((x_hat_actual != exact_target).sum().item())
             actual_max_abs_error = max(
                 actual_max_abs_error,

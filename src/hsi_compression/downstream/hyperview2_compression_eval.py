@@ -31,10 +31,16 @@ from hsi_compression.downstream.hyperview2 import (
     split_samples,
 )
 from hsi_compression.downstream.hyperview2_regressors import build_hyperview2_regressor
+from hsi_compression.engine.model_io import (
+    call_model_compress,
+    call_model_decompress,
+    call_model_forward,
+)
 from hsi_compression.metrics import (
     compute_compression_ratio_from_bpppc,
     masked_psnr,
     masked_sam_deg,
+    sum_string_bytes,
 )
 from hsi_compression.models.registry import build_model
 
@@ -117,71 +123,6 @@ def read_reconstruction_summary(recon_root: str | Path) -> dict[str, Any] | None
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def call_model_forward(
-    model: torch.nn.Module,
-    x: torch.Tensor,
-    mask: torch.Tensor,
-    wavelengths: Sequence[float] | None = None,
-    output_wavelengths: Sequence[float] | None = None,
-) -> Any:
-    try:
-        return model(
-            x,
-            valid_mask=mask,
-            wavelengths=wavelengths,
-            output_wavelengths=output_wavelengths,
-        )
-    except TypeError:
-        try:
-            return model(x, valid_mask=mask)
-        except TypeError:
-            return model(x)
-
-
-def call_model_compress(
-    model: torch.nn.Module,
-    x: torch.Tensor,
-    mask: torch.Tensor,
-    wavelengths: Sequence[float] | None = None,
-) -> Any:
-    try:
-        return model.compress(x, valid_mask=mask, wavelengths=wavelengths)
-    except TypeError:
-        try:
-            return model.compress(x, valid_mask=mask)
-        except TypeError:
-            return model.compress(x)
-
-
-def call_model_decompress(
-    model: torch.nn.Module,
-    packed: Mapping[str, Any],
-    output_wavelengths: Sequence[float] | None = None,
-) -> Any:
-    if "latent" in packed:
-        return model.decompress(latent=packed["latent"], z_shape=packed.get("z_shape"))
-    kwargs = {"strings": packed["strings"], "shape": packed["shape"]}
-    if packed.get("z_shape") is not None:
-        kwargs["z_shape"] = packed["z_shape"]
-    if packed.get("output_channels") is not None:
-        kwargs["output_channels"] = packed["output_channels"]
-    if output_wavelengths is not None:
-        kwargs["output_wavelengths"] = output_wavelengths
-    return model.decompress(**kwargs)
-
-
-def sum_string_bytes(obj: Any) -> int:
-    if isinstance(obj, bytes):
-        return len(obj)
-    if isinstance(obj, bytearray):
-        return len(obj)
-    if isinstance(obj, str):
-        return len(obj.encode("utf-8"))
-    if isinstance(obj, (list, tuple)):
-        return sum(sum_string_bytes(item) for item in obj)
-    raise TypeError(f"Unsupported strings container type: {type(obj)!r}")
 
 
 def read_checkpoint_config(checkpoint_path: str | Path) -> dict[str, Any]:

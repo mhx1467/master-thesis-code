@@ -404,11 +404,7 @@ def main() -> None:
     entries = manifest.get("models", [])
 
     rows = [_row_from_entry(entry, protocol) for entry in entries]
-    gap_rows = [
-        row
-        for row in rows
-        if not _is_reference_comparable_result(row)
-    ]
+    gap_rows = [row for row in rows if not _is_reference_comparable_result(row)]
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

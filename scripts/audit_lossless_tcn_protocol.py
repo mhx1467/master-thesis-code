@@ -20,6 +20,7 @@ from hsi_compression.engine.checkpointing import load_checkpoint
 from hsi_compression.metrics import (
     compute_actual_bpppc_from_strings,
     compute_compression_ratio_from_bpppc,
+    sum_string_bytes,
 )
 from hsi_compression.models.registry import build_model
 from hsi_compression.paths import logs_dir
@@ -155,14 +156,6 @@ def unwrap_single_bytes(strings: Any) -> bytes | None:
     if isinstance(strings, (list, tuple)) and len(strings) == 1:
         return unwrap_single_bytes(strings[0])
     return None
-
-
-def sum_string_bytes(strings: Any) -> int:
-    if isinstance(strings, (bytes, bytearray)):
-        return len(strings)
-    if isinstance(strings, (list, tuple)):
-        return sum(sum_string_bytes(item) for item in strings)
-    raise TypeError(f"Unsupported strings container type: {type(strings)!r}")
 
 
 def read_tcn_header(strings: Any) -> dict[str, Any] | None:

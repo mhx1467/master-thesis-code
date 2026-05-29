@@ -12,6 +12,14 @@ from tqdm.auto import tqdm
 
 from hsi_compression.data import build_dataloader, build_dataset
 from hsi_compression.engine.checkpointing import load_checkpoint
+from hsi_compression.engine.model_io import (
+    call_model_compress,
+    call_model_decompress,
+    call_model_forward,
+    exact_reconstruction_target,
+    model_proxy_bpppc,
+    validate_packed_output,
+)
 from hsi_compression.metrics import (
     compute_actual_bpppc_from_strings,
     compute_compression_ratio_from_bpppc,
@@ -55,62 +63,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _call_model_forward(model, x, mask):
-    # models are allowed to ignore masks for backwards compatibility
-    try:
-        return model(x, valid_mask=mask)
-    except TypeError:
-        return model(x)
-
-
-def _call_model_compress(model, x, mask):
-    # newer models accept masks during compression, older baselines do not.
-    try:
-        return model.compress(x, valid_mask=mask)
-    except TypeError:
-        return model.compress(x)
-
-
-def _call_model_decompress(model, packed, mask):
-    if "latent" in packed:
-        # some experimental codecs return a latent tensor instead of entropy-coded strings.
-        return model.decompress(latent=packed["latent"], z_shape=packed.get("z_shape"))
-
-    kwargs = {
-        "strings": packed["strings"],
-        "shape": packed["shape"],
-    }
-    if "z_shape" in packed and packed["z_shape"] is not None:
-        kwargs["z_shape"] = packed["z_shape"]
-    if "output_channels" in packed and packed["output_channels"] is not None:
-        kwargs["output_channels"] = packed["output_channels"]
-
-    _ = mask
-    return model.decompress(**kwargs)
-
-
-def _validate_packed_output(packed: dict):
-    # actual bitrate is only meaningful if compress returns a real payload
-    if not isinstance(packed, dict):
-        raise RuntimeError("model.compress() must return a dict")
-    if "latent" in packed:
-        return
-    if "strings" not in packed:
-        raise RuntimeError("model.compress() output must contain 'strings'")
-    if "shape" not in packed:
-        raise RuntimeError("model.compress() output must contain 'shape'")
-    if packed["strings"] is None:
-        raise RuntimeError("model.compress() returned strings=None")
-
-
-def _exact_reconstruction_target(model, x):
-    model_raw = model.module if hasattr(model, "module") else model
-    target_fn = getattr(model_raw, "exact_reconstruction_target", None)
-    if callable(target_fn):
-        return target_fn(x)
-    return x
-
-
 def _safe_filename_stem(value: str) -> str:
     # make user-provided run names safe for json file names.
     allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -128,15 +80,6 @@ def evaluate_model(
     use_amp=False,
 ):
     model.eval()
-
-    def _get_proxy_bpppc(model_obj) -> float | None:
-        model_raw = model_obj.module if hasattr(model_obj, "module") else model_obj
-        # proxy bitrate is kept separate from measured bitstream bitrate
-        proxy = getattr(model_raw, "proxy_bpppc", None)
-        if proxy is not None:
-            return float(proxy)
-        legacy = getattr(model_raw, "bpppc", None)
-        return float(legacy) if legacy is not None else None
 
     totals = {
         "loss": 0.0,
@@ -204,7 +147,7 @@ def evaluate_model(
             if device.type == "cuda":
                 start_event.record()
 
-            outputs = _call_model_forward(model, x, mask)
+            outputs = call_model_forward(model, x, mask)
 
             if device.type == "cuda":
                 end_event.record()
@@ -275,10 +218,10 @@ def evaluate_model(
             has_likelihoods = True
             # likelihood bitrate is estimated from entropy-model probabilities.
             totals["likelihood_bpppc"] += compute_true_bpppc(likelihoods, x.shape)
-        model_proxy_bpppc = _get_proxy_bpppc(model)
-        if model_proxy_bpppc is not None:
-            totals["proxy_bpppc"] += model_proxy_bpppc
-            totals["ref_bpppc"] += model_proxy_bpppc
+        model_proxy = model_proxy_bpppc(model)
+        if model_proxy is not None:
+            totals["proxy_bpppc"] += model_proxy
+            totals["ref_bpppc"] += model_proxy
 
         if latent_shape is None and z is not None:
             latent_shape = tuple(z.shape[1:])
@@ -295,16 +238,16 @@ def evaluate_model(
             if device.type == "cuda":
                 torch.cuda.synchronize()
             encode_start = time.perf_counter()
-            packed = _call_model_compress(model, x, mask)
+            packed = call_model_compress(model, x, mask)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             encode_times_ms.append((time.perf_counter() - encode_start) * 1000.0)
-            _validate_packed_output(packed)
+            validate_packed_output(packed)
 
             if device.type == "cuda":
                 torch.cuda.synchronize()
             decode_start = time.perf_counter()
-            decoded = _call_model_decompress(model, packed, mask)
+            decoded = call_model_decompress(model, packed)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             decode_times_ms.append((time.perf_counter() - decode_start) * 1000.0)
@@ -313,7 +256,7 @@ def evaluate_model(
                 raise RuntimeError("model.decompress() must return a dict containing 'x_hat'")
 
             x_hat_actual = decoded["x_hat"].float()
-            exact_target = _exact_reconstruction_target(model, x).float()
+            exact_target = exact_reconstruction_target(model, x).float()
             actual_available = True
 
             # actual metrics use the decoded reconstruction, not the differentiable forward pass.
