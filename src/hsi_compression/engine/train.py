@@ -21,6 +21,18 @@ from hsi_compression.metrics import (
 from hsi_compression.utils.distributed import is_main_process, reduce_mean
 
 
+def _model_kwargs_from_batch(batch: dict, device: torch.device) -> dict:
+    kwargs = {}
+    for key in ("wavelengths", "output_wavelengths"):
+        value = batch.get(key)
+        if value is None:
+            continue
+        if torch.is_tensor(value):
+            value = value.to(device, non_blocking=True)
+        kwargs[key] = value
+    return kwargs
+
+
 def train_one_epoch(
     model,
     loader,
@@ -68,9 +80,11 @@ def train_one_epoch(
             x = batch["x"].to(device, non_blocking=True)
             mask = batch.get("valid_mask")
             mask = mask.to(device, non_blocking=True) if mask is not None else None
+            model_kwargs = _model_kwargs_from_batch(batch, device)
         else:
             x = batch.to(device, non_blocking=True)
             mask = None
+            model_kwargs = {}
 
         optimizer.zero_grad(set_to_none=True)
         # autocast reduces memory and speeds up cuda training when mixed precision is enabled.
@@ -80,7 +94,7 @@ def train_one_epoch(
             dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,
         ):
             try:
-                outputs = model(x, valid_mask=mask)
+                outputs = model(x, valid_mask=mask, **model_kwargs)
             except TypeError:
                 outputs = model(x)
             x_hat = outputs.get("x_hat_for_loss", outputs["x_hat"]).float()

@@ -1,6 +1,7 @@
 import torch
 
 from scripts.train_hyperview2_compressor import (
+    _build_hyperview2_collate,
     _configure_trainable_parameters,
     _limit_samples,
 )
@@ -48,3 +49,25 @@ def test_configure_trainable_parameters_freeze_overrides_trainable_filter():
 
     assert model.encoder.weight.requires_grad is True
     assert model.decoder.weight.requires_grad is False
+
+
+def test_hyperview2_collate_attaches_model_wavelengths():
+    collate = _build_hyperview2_collate(
+        spectral_mapping=None,
+        pad_multiple=1,
+        min_spatial_size=1,
+        model_wavelengths=[400.0, 500.0, 600.0],
+    )
+    batch = [
+        {
+            "x": torch.ones(3, 2, 2),
+            "valid_mask": torch.ones(3, 2, 2, dtype=torch.bool),
+            "sample_id": "1",
+            "path": "sample.npz",
+        }
+    ]
+
+    out = collate(batch)
+
+    assert out["wavelengths"].tolist() == [400.0, 500.0, 600.0]
+    assert out["output_wavelengths"].tolist() == [400.0, 500.0, 600.0]

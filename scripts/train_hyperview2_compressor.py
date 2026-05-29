@@ -18,8 +18,10 @@ from hsi_compression.downstream.hyperview2 import (
     split_samples,
 )
 from hsi_compression.downstream.hyperview2_compression_eval import (
+    _load_state_dict_allowing_entropy_runtime_buffers,
     apply_input_spectral_mapping,
     build_spectral_mapping,
+    model_input_wavelengths_for_mapping,
 )
 from hsi_compression.engine import fit
 from hsi_compression.losses import build_loss
@@ -57,9 +59,9 @@ def _split_main_aux_parameters(model):
     return main_parameters, aux_parameters
 
 
-def _load_pretrained_weights(model, checkpoint_path: Path, device: torch.device) -> None:
+def _load_pretrained_weights(model, checkpoint_path: Path, device: torch.device) -> list[str]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    return _load_state_dict_allowing_entropy_runtime_buffers(model, checkpoint["model_state_dict"])
 
 
 def _limit_samples(samples, subset_size: int | None, seed: int):
@@ -134,6 +136,7 @@ def _build_hyperview2_collate(
     spectral_mapping: dict | None,
     pad_multiple: int,
     min_spatial_size: int,
+    model_wavelengths: list[float] | None = None,
 ):
     def _collate(batch):
         collated = collate_compression_batch(
@@ -141,19 +144,22 @@ def _build_hyperview2_collate(
             pad_multiple=pad_multiple,
             min_spatial_size=min_spatial_size,
         )
-        if spectral_mapping is None:
-            return collated
-        x, mask = apply_input_spectral_mapping(
-            collated["x"],
-            collated["valid_mask"],
-            spectral_mapping,
-        )
-        collated["x"] = x
-        collated["valid_mask"] = mask
-        collated["original_shape"] = [
-            (int(x.shape[1]), int(shape[-2]), int(shape[-1]))
-            for shape in collated["original_shape"]
-        ]
+        if spectral_mapping is not None:
+            x, mask = apply_input_spectral_mapping(
+                collated["x"],
+                collated["valid_mask"],
+                spectral_mapping,
+            )
+            collated["x"] = x
+            collated["valid_mask"] = mask
+            collated["original_shape"] = [
+                (int(x.shape[1]), int(shape[-2]), int(shape[-1]))
+                for shape in collated["original_shape"]
+            ]
+        if model_wavelengths is not None:
+            wavelengths = torch.as_tensor(model_wavelengths, dtype=torch.float32)
+            collated["wavelengths"] = wavelengths
+            collated["output_wavelengths"] = wavelengths
         return collated
 
     return _collate
@@ -253,6 +259,7 @@ def main() -> None:
     training_cfg = cfg.get("training", {})
     model_cfg = cfg.get("model", {})
     logging_cfg = cfg.get("logging", {})
+    model_name = model_cfg.get("model_name")
 
     if args.override_experiment_name is not None:
         experiment_cfg["name"] = args.override_experiment_name
@@ -348,15 +355,32 @@ def main() -> None:
         if spectral_mapping is not None
         else input_channels
     )
+    model_input_wavelengths = (
+        model_input_wavelengths_for_mapping(
+            spectral_mapping,
+            source_root=hv2_root,
+            modality=modality,
+            input_channels=input_channels,
+        )
+        if model_name == "hierarchical_spectral_mamba_sensor_aware"
+        else None
+    )
     print(
         f"Input bands: {input_channels} -> model bands: {model_input_channels} | "
         f"Train: {len(train_ds)} | Val: {len(val_ds)}"
     )
+    if model_input_wavelengths is not None:
+        print(
+            "Model wavelengths: "
+            f"{len(model_input_wavelengths)} values from {min(model_input_wavelengths):.2f} "
+            f"to {max(model_input_wavelengths):.2f}"
+        )
 
     collate_fn = _build_hyperview2_collate(
         spectral_mapping=spectral_mapping,
         pad_multiple=pad_multiple,
         min_spatial_size=min_spatial_size,
+        model_wavelengths=model_input_wavelengths,
     )
     train_loader = _build_hyperview2_loader(
         train_ds,
@@ -382,7 +406,6 @@ def main() -> None:
     )
     print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
 
-    model_name = model_cfg.get("model_name")
     model_kwargs = {
         key: value
         for key, value in model_cfg.get("model_kwargs", {}).items()
@@ -399,8 +422,12 @@ def main() -> None:
         if not pretrained_path.exists():
             print(f"Error: pretrained checkpoint does not exist: {pretrained_path}")
             sys.exit(1)
-        print(f"Loading pretrained weights strictly from: {pretrained_path}")
-        _load_pretrained_weights(model, pretrained_path, device=device)
+        print(f"Loading pretrained weights from: {pretrained_path}")
+        skipped = _load_pretrained_weights(model, pretrained_path, device=device)
+        if skipped:
+            print("Ignored entropy runtime buffers restored by model.update():")
+            for name in skipped:
+                print(f"  {name}")
 
     if hasattr(model, "update"):
         model.update(force=True)
@@ -478,6 +505,7 @@ def main() -> None:
         "val_samples": len(val_ds),
         "input_channels": input_channels,
         "model_input_channels": model_input_channels,
+        "model_input_wavelengths": model_input_wavelengths,
         "spectral_mapping_payload": spectral_mapping,
     }
     run_cfg = {

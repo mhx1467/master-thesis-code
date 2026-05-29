@@ -25,21 +25,47 @@ from hsi_compression.utils.distributed import is_main_process, reduce_mean
 ORIGINAL_BITS_PER_CHANNEL = 16.0
 
 
-def _call_model_compress(model, x: torch.Tensor, mask: torch.Tensor | None):
+def _model_kwargs_from_batch(batch: dict, device: torch.device) -> dict:
+    kwargs = {}
+    for key in ("wavelengths", "output_wavelengths"):
+        value = batch.get(key)
+        if value is None:
+            continue
+        if torch.is_tensor(value):
+            value = value.to(device, non_blocking=True)
+        kwargs[key] = value
+    return kwargs
+
+
+def _call_model_compress(
+    model,
+    x: torch.Tensor,
+    mask: torch.Tensor | None,
+    wavelengths=None,
+):
     # newer models accept masks during compression, older baselines do not.
     try:
-        return model.compress(x, valid_mask=mask)
+        return model.compress(x, valid_mask=mask, wavelengths=wavelengths)
     except TypeError:
-        return model.compress(x)
+        try:
+            return model.compress(x, valid_mask=mask)
+        except TypeError:
+            return model.compress(x)
 
 
-def _call_model_decompress(model, packed: dict):
+def _call_model_decompress(model, packed: dict, output_wavelengths=None):
     kwargs = {"strings": packed["strings"], "shape": packed["shape"]}
     if "z_shape" in packed and packed["z_shape"] is not None:
         kwargs["z_shape"] = packed["z_shape"]
     if "output_channels" in packed and packed["output_channels"] is not None:
         kwargs["output_channels"] = packed["output_channels"]
-    return model.decompress(**kwargs)
+    if output_wavelengths is not None:
+        kwargs["output_wavelengths"] = output_wavelengths
+    try:
+        return model.decompress(**kwargs)
+    except TypeError:
+        kwargs.pop("output_wavelengths", None)
+        return model.decompress(**kwargs)
 
 
 def _supports_actual_compression(model) -> bool:
@@ -119,9 +145,11 @@ def validate_one_epoch(
             x = batch["x"].to(device, non_blocking=True)
             mask = batch.get("valid_mask")
             mask = mask.to(device, non_blocking=True) if mask is not None else None
+            model_kwargs = _model_kwargs_from_batch(batch, device)
         else:
             x = batch.to(device, non_blocking=True)
             mask = None
+            model_kwargs = {}
 
         with torch.autocast(
             device_type=device.type,
@@ -129,7 +157,7 @@ def validate_one_epoch(
             dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,
         ):
             try:
-                outputs = model(x, valid_mask=mask)
+                outputs = model(x, valid_mask=mask, **model_kwargs)
             except TypeError:
                 outputs = model(x)
             x_hat = outputs["x_hat"].float()
@@ -218,7 +246,12 @@ def validate_one_epoch(
             if device.type == "cuda":
                 torch.cuda.synchronize()
             encode_start = time.perf_counter()
-            packed = _call_model_compress(model, x, mask)
+            packed = _call_model_compress(
+                model,
+                x,
+                mask,
+                wavelengths=model_kwargs.get("wavelengths"),
+            )
             if device.type == "cuda":
                 torch.cuda.synchronize()
             encode_times_ms.append((time.perf_counter() - encode_start) * 1000.0)
@@ -229,7 +262,14 @@ def validate_one_epoch(
             if device.type == "cuda":
                 torch.cuda.synchronize()
             decode_start = time.perf_counter()
-            decoded = _call_model_decompress(model, packed)
+            output_wavelengths = model_kwargs.get("output_wavelengths")
+            if output_wavelengths is None:
+                output_wavelengths = model_kwargs.get("wavelengths")
+            decoded = _call_model_decompress(
+                model,
+                packed,
+                output_wavelengths=output_wavelengths,
+            )
             if device.type == "cuda":
                 torch.cuda.synchronize()
             decode_times_ms.append((time.perf_counter() - decode_start) * 1000.0)
