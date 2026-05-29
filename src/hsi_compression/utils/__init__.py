@@ -11,6 +11,7 @@ from .distributed import (
 )
 from .env import load_project_env
 from .git import get_git_commit_hash, get_git_short_hash, is_git_dirty
+from .names import safe_path_component, safe_sample_stem
 from .seed import set_seed
 
 __all__ = [
@@ -28,4 +29,6 @@ __all__ = [
     "cleanup_distributed",
     "barrier",
     "reduce_mean",
+    "safe_path_component",
+    "safe_sample_stem",
 ]

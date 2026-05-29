@@ -40,6 +40,7 @@ from hsi_compression.metrics import (
 from hsi_compression.models.registry import build_model
 from hsi_compression.paths import ensure_artifact_dirs, logs_dir
 from hsi_compression.utils import load_project_env
+from hsi_compression.utils.names import safe_path_component
 from hsi_compression.utils.wandb_utils import init_wandb
 
 ORIGINAL_BITS_PER_CHANNEL = 16.0
@@ -61,13 +62,6 @@ def parse_args():
     parser.add_argument("--save-json", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
     return parser.parse_args()
-
-
-def _safe_filename_stem(value: str) -> str:
-    # make user-provided run names safe for json file names.
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-    stem = "".join(ch if ch in allowed else "_" for ch in value).strip("._-")
-    return stem or "eval"
 
 
 @torch.no_grad()
@@ -646,7 +640,7 @@ def main():
 
     if args.save_json:
         if args.run_name:
-            filename_stem = _safe_filename_stem(args.run_name)
+            filename_stem = safe_path_component(args.run_name, fallback="eval")
         else:
             filename_stem = f"eval_{model_name}_{difficulty}_{args.split}"
         out = logs_dir() / f"{filename_stem}.json"

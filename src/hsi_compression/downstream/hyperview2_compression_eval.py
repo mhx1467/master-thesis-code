@@ -43,6 +43,7 @@ from hsi_compression.metrics import (
     sum_string_bytes,
 )
 from hsi_compression.models.registry import build_model
+from hsi_compression.utils.names import safe_path_component, safe_sample_stem
 
 _ENTROPY_RUNTIME_BUFFER_SUFFIXES = ("_offset", "_quantized_cdf", "_cdf_length")
 _CHANNEL_AGNOSTIC_MODEL_NAMES = {"hierarchical_spectral_mamba_sensor_aware"}
@@ -69,14 +70,6 @@ class CompressionCheckpoint:
         record = asdict(self)
         record["path"] = str(self.path)
         return record
-
-
-def safe_sample_stem(sample_id: str) -> str:
-    return f"{int(sample_id):04d}" if str(sample_id).isdigit() else str(sample_id)
-
-
-def safe_variant_component(value: str) -> str:
-    return str(value).replace("/", "_").replace(" ", "_")
 
 
 def discover_recon_roots(parent: str | Path) -> dict[str, Path]:
@@ -510,9 +503,8 @@ def reconstruct_checkpoint(
         key="normalization",
         fallback=checkpoint_normalization_fallback,
     )
-    variant_name = checkpoint.variant_name or (
-        f"{checkpoint.name}_input_{safe_variant_component(resolved_normalization)}"
-    )
+    safe_normalization = safe_path_component(resolved_normalization, fallback="variant")
+    variant_name = checkpoint.variant_name or f"{checkpoint.name}_input_{safe_normalization}"
     use_amp = checkpoint.use_amp if checkpoint.use_amp is not None else device.type == "cuda"
 
     print(

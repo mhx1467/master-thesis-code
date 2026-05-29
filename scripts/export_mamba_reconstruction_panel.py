@@ -17,6 +17,7 @@ from hsi_compression.engine.model_io import call_model_forward
 from hsi_compression.metrics import masked_mae, masked_psnr, masked_sam_deg, ref_ssim
 from hsi_compression.models.registry import build_model
 from hsi_compression.utils import load_project_env
+from hsi_compression.utils.names import safe_path_component
 from hsi_compression.visualization import choose_evenly_spaced_rgb_bands
 
 
@@ -217,12 +218,6 @@ def _reconstruct(
     )
 
 
-def _safe_stem(value: str) -> str:
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-    stem = "".join(ch if ch in allowed else "_" for ch in value).strip("._-")
-    return stem or "mamba_reconstruction_panel"
-
-
 def _save_panel(
     output_path: Path,
     rows: list[dict],
@@ -369,9 +364,12 @@ def main() -> None:
         )
 
     experiment_name = cfg.get("experiment", {}).get("name", checkpoint_path.stem)
+    safe_experiment_name = safe_path_component(
+        experiment_name, fallback="mamba_reconstruction_panel"
+    )
     output_path = Path(
         args.output
-        or f"artifacts/analysis/mamba_k4_reconstruction_panel/{_safe_stem(experiment_name)}_{args.split}.png"
+        or f"artifacts/analysis/mamba_k4_reconstruction_panel/{safe_experiment_name}_{args.split}.png"
     )
     _save_panel(
         output_path=output_path,

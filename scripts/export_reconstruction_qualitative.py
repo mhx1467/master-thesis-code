@@ -24,6 +24,7 @@ from hsi_compression.metrics import (
 )
 from hsi_compression.models.registry import build_model
 from hsi_compression.utils import load_project_env
+from hsi_compression.utils.names import safe_path_component
 from hsi_compression.visualization import choose_evenly_spaced_rgb_bands
 
 DEFAULT_CHECKPOINTS = (
@@ -171,12 +172,6 @@ def _load_model(spec: CheckpointSpec, in_channels: int, device: torch.device) ->
         model.update(force=True)
     model.eval()
     return LoadedModel(label=spec.label, path=spec.path, model=model, config=cfg)
-
-
-def _safe_name(value: str) -> str:
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-    out = "".join(ch if ch in allowed else "_" for ch in value)
-    return out.strip("._-") or "sample"
 
 
 def _valid_pixel_mask(mask: torch.Tensor | None, h: int, w: int) -> np.ndarray:
@@ -598,7 +593,9 @@ def main() -> None:
     for sample_index in sample_indices:
         sample = dataset[sample_index]
         patch_id = sample.get("patch_id", f"idx_{sample_index}")
-        sample_dir = output_dir / f"sample_{sample_index:04d}_{_safe_name(str(patch_id))}"
+        sample_dir = output_dir / (
+            f"sample_{sample_index:04d}_{safe_path_component(patch_id, fallback='sample')}"
+        )
         sample_dir.mkdir(parents=True, exist_ok=True)
 
         x_cpu, mask_cpu, recons = _reconstruct_sample(
