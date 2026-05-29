@@ -57,6 +57,19 @@ python scripts/train.py \
   --pretrained artifacts/checkpoints/hierarchical_spectral_mamba_sensor_aware_recon_latent96_best.pt
 ```
 
+Polishing fine-tune after the first sensor-aware pretraining plateaus:
+
+```bash
+python scripts/train.py \
+  --config configs/mamba/hierarchical_spectral_mamba_sensor_aware_polish_ft.yaml \
+  --dataset-root "$DATASET_ROOT" \
+  --pretrained artifacts/checkpoints/hierarchical_spectral_mamba_sensor_aware_recon_latent96_best.pt
+```
+
+This run keeps the same spectral-feature objective but reduces encoder-side spectral
+augmentation. Use it when the strong-augmentation pretraining reaches a stable best checkpoint
+but validation PSNR/SSIM become noisy or start drifting down.
+
 ## Evaluation Discipline
 
 For HySpecNet-11k, compare against the existing `K=4` Mamba at the same dataset split,

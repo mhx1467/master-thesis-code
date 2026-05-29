@@ -1,0 +1,84 @@
+experiment:
+  name: hierarchical_spectral_mamba_sensor_aware_polish_ft
+  seed: 42
+
+data:
+  difficulty: easy
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  prefer_npy: true
+  npy_mmap: false
+  debug_loader_timing: false
+  drop_invalid_channels: true
+  train_subset_size: null
+  val_subset_size: null
+
+training:
+  use_amp: true
+  epochs: 50
+  lr: 0.00003
+  loss_name: spectral_feature
+  loss_kwargs:
+    pixel_weight: 1.0
+    mean_weight: 0.5
+    std_weight: 0.25
+    first_derivative_weight: 1.0
+    second_derivative_weight: 0.25
+    spectral_cosine_weight: 0.01
+  grad_clip_max_norm: 1.0
+  sam_every_n_epochs: 5
+  fast_train_metrics: true
+  scheduler:
+    enabled: true
+    name: cosine
+    T_max: 50
+    eta_min: 1.0e-06
+  early_stopping:
+    enabled: true
+    patience: 15
+    psnr_min_delta: 0.005
+
+model:
+  model_name: hierarchical_spectral_mamba_sensor_aware
+  model_kwargs:
+    in_channels: 202
+    latent_channels: 96
+    group_size: 4
+    spectral_d_model: 64
+    spectral_mlp_hidden_dim: 128
+    spectral_out_channels: 96
+    num_summary_tokens: 4
+    num_local_blocks: 2
+    num_global_blocks: 1
+    wavelength_embedding_dim: 16
+    wavelength_num_frequencies: 8
+    wavelength_preset: hyspecnet_clean_approx
+    spatial_embed_channels: 16
+    spatial_context_channels: 64
+    mamba_d_state: 16
+    mamba_d_conv: 4
+    mamba_expand: 2
+    use_spatial_conditioning: true
+    use_affine_conditioning: true
+    use_sensor_adapter: true
+    sensor_adapter_hidden_dim: 32
+    sensor_adapter_scale_limit: 0.25
+    sensor_adapter_bias_limit: 0.05
+    spectral_chunk_size: 512
+    decoder_band_chunk_size: 64
+    spectral_augmentation:
+      enabled: true
+      band_dropout_probability: 0.02
+      min_keep_fraction: 0.95
+      wavelength_jitter_std: 0.0005
+      spectral_blur_probability: 0.10
+      reflectance_scale_std: 0.01
+    output_activation: sigmoid
+    dropout: 0.0
+
+logging:
+  use_wandb: true
+  project: hsi-compression-paper
