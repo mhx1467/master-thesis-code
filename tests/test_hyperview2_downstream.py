@@ -24,6 +24,7 @@ from hsi_compression.downstream.hyperview2 import load_mask, normalize_cube, to_
 from hsi_compression.downstream.hyperview2_compression_eval import (
     _load_state_dict_allowing_entropy_runtime_buffers,
     apply_input_spectral_mapping,
+    build_model_from_checkpoint,
     build_spectral_mapping,
     evaluate_downstream_regressors,
     infer_recon_input_normalization,
@@ -33,6 +34,7 @@ from hsi_compression.downstream.hyperview2_compression_eval import (
     reconstruct_spectral_resample_passthrough,
 )
 from hsi_compression.downstream.hyperview2_regressors import available_regressor_names
+from hsi_compression.models.registry import build_model
 
 
 def _write_labels(path, rows):
@@ -40,6 +42,56 @@ def _write_labels(path, rows):
         writer = csv.writer(handle)
         writer.writerow(["sample_id", *HYPERVIEW2_TARGET_COLUMNS])
         writer.writerows(rows)
+
+
+def _tiny_sensor_aware_kwargs(in_channels: int) -> dict:
+    return {
+        "in_channels": in_channels,
+        "latent_channels": 8,
+        "group_size": 2,
+        "spectral_d_model": 8,
+        "spectral_mlp_hidden_dim": 16,
+        "spectral_out_channels": 8,
+        "num_summary_tokens": 2,
+        "num_local_blocks": 0,
+        "num_global_blocks": 0,
+        "wavelength_embedding_dim": 6,
+        "wavelength_num_frequencies": 2,
+        "spatial_embed_channels": 4,
+        "spatial_context_channels": 8,
+        "spectral_chunk_size": 128,
+        "decoder_band_chunk_size": 4,
+        "spectral_augmentation": {"enabled": False},
+    }
+
+
+def test_sensor_aware_checkpoint_loads_different_channel_count_without_legacy_adapter(tmp_path):
+    source_kwargs = _tiny_sensor_aware_kwargs(in_channels=8)
+    source = build_model("hierarchical_spectral_mamba_sensor_aware", **source_kwargs)
+    checkpoint_path = tmp_path / "sensor_aware.pt"
+    torch.save(
+        {
+            "config": {
+                "model": {
+                    "model_name": "hierarchical_spectral_mamba_sensor_aware",
+                    "model_kwargs": source_kwargs,
+                }
+            },
+            "model_state_dict": source.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    model, _, notes = build_model_from_checkpoint(
+        checkpoint_path,
+        in_channels=10,
+        device=torch.device("cpu"),
+        allow_in_channel_adapter=False,
+    )
+
+    x = torch.rand(1, 10, 16, 16)
+    assert model(x)["x_hat"].shape == x.shape
+    assert any("channel-agnostic" in note for note in notes)
 
 
 def test_build_hyperview2_samples_pairs_labels_with_prisma_arrays(tmp_path):

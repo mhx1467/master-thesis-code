@@ -39,6 +39,7 @@ from hsi_compression.metrics import (
 from hsi_compression.models.registry import build_model
 
 _ENTROPY_RUNTIME_BUFFER_SUFFIXES = ("_offset", "_quantized_cdf", "_cdf_length")
+_CHANNEL_AGNOSTIC_MODEL_NAMES = {"hierarchical_spectral_mamba_sensor_aware"}
 
 
 @dataclass(frozen=True)
@@ -518,15 +519,23 @@ def build_model_from_checkpoint(
     state_dict = raw["model_state_dict"]
 
     if checkpoint_in_channels != in_channels:
-        if not allow_in_channel_adapter:
+        channel_agnostic = model_name in _CHANNEL_AGNOSTIC_MODEL_NAMES
+        if not allow_in_channel_adapter and not channel_agnostic:
             raise RuntimeError(
                 f"Checkpoint has {checkpoint_in_channels} channels, input has {in_channels}. "
                 "Enable allow_in_channel_adapter only for documented diagnostic transfer."
             )
-        adapted_state, adapter_notes = adapt_hyspecnet_202_state_dict_to_hyperview2(
-            state_dict,
-            model,
-        )
+        if channel_agnostic:
+            adapted_state = state_dict
+            adapter_notes.append(
+                f"channel-agnostic {model_name}: checkpoint channels "
+                f"{checkpoint_in_channels} -> runtime channels {in_channels}"
+            )
+        else:
+            adapted_state, adapter_notes = adapt_hyspecnet_202_state_dict_to_hyperview2(
+                state_dict,
+                model,
+            )
         skipped = _load_state_dict_allowing_entropy_runtime_buffers(model, adapted_state)
     else:
         skipped = _load_state_dict_allowing_entropy_runtime_buffers(model, state_dict)
