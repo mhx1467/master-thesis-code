@@ -17,8 +17,10 @@ Disk requirements:
 """
 
 import argparse
+import csv
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -34,9 +36,95 @@ PATCH_SIZE = 128
 EXPECTED_SHAPE_CHW = (EXPECTED_BANDS, PATCH_SIZE, PATCH_SIZE)
 
 
+@dataclass(frozen=True)
+class ConversionJob:
+    tif_path: Path
+    npy_path: Path
+    force: bool
+
+
 def _npy_path(tif_path: Path) -> Path:
     stem = tif_path.stem.replace("-SPECTRAL_IMAGE", "")
     return tif_path.parent / f"{stem}-DATA.npy"
+
+
+def _split_entry_to_tif_path(dataset_root: Path, split_entry: str) -> Path:
+    rel = Path(split_entry.strip())
+    if rel.is_absolute():
+        raise ValueError(f"split entries must be relative to patches/: {split_entry}")
+    if rel.parts and rel.parts[0] == "patches":
+        rel = Path(*rel.parts[1:])
+    if rel.suffix != ".npy" or not rel.name.endswith("-DATA.npy"):
+        raise ValueError(f"split entry must point to a *-DATA.npy file: {split_entry}")
+
+    tif_name = rel.name.removesuffix("-DATA.npy") + "-SPECTRAL_IMAGE.TIF"
+    tif_path = dataset_root / "patches" / rel.parent / tif_name
+    if tif_path.exists():
+        return tif_path
+
+    lower = tif_path.with_suffix(".tif")
+    if lower.exists():
+        return lower
+
+    raise FileNotFoundError(f"missing source TIF for split entry {split_entry}: {tif_path}")
+
+
+def _read_split_entries(split_csv: Path) -> list[str]:
+    entries: list[str] = []
+    with split_csv.open(newline="") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if not row:
+                continue
+            value = row[0].strip()
+            if not value or value.startswith("#"):
+                continue
+            entries.append(value)
+    if not entries:
+        raise ValueError(f"split CSV contains no entries: {split_csv}")
+    return entries
+
+
+def _output_npy_path(
+    tif_path: Path,
+    *,
+    dataset_root: Path,
+    output_root: Path | None,
+) -> Path:
+    if output_root is None:
+        return _npy_path(tif_path)
+
+    patches_dir = dataset_root / "patches"
+    rel_tif = tif_path.relative_to(patches_dir)
+    stem = tif_path.stem.replace("-SPECTRAL_IMAGE", "")
+    rel_npy = rel_tif.with_name(f"{stem}-DATA.npy")
+    return output_root / "patches" / rel_npy
+
+
+def _build_jobs(dataset_root: Path, split_csv: Path | None, output_root: Path | None, force: bool):
+    patches_dir = dataset_root / "patches"
+    if split_csv is None:
+        tif_files = sorted(patches_dir.rglob("*-SPECTRAL_IMAGE.TIF"))
+        if not tif_files:
+            tif_files = sorted(patches_dir.rglob("*-SPECTRAL_IMAGE.tif"))
+        if not tif_files:
+            raise FileNotFoundError(f"no *-SPECTRAL_IMAGE.TIF files in {patches_dir}")
+    else:
+        split_entries = _read_split_entries(split_csv)
+        tif_files = [_split_entry_to_tif_path(dataset_root, entry) for entry in split_entries]
+
+    return [
+        ConversionJob(
+            tif_path=tif_path,
+            npy_path=_output_npy_path(
+                tif_path,
+                dataset_root=dataset_root,
+                output_root=output_root,
+            ),
+            force=force,
+        )
+        for tif_path in tif_files
+    ]
 
 
 def _preprocess_tif(tif_path: Path) -> np.ndarray:
@@ -67,35 +155,33 @@ def _preprocess_tif(tif_path: Path) -> np.ndarray:
     return x
 
 
-def convert_one(args: tuple[Path, bool]) -> tuple[Path, str, str]:
+def convert_one(job: ConversionJob) -> tuple[Path, str, str]:
     """
     Converts one TIF → NPY file.
     Returns (npy_path, status, error_msg).
     Status: "converted" | "skipped" | "error"
     """
-    tif_path, force = args
-    npy_path = _npy_path(tif_path)
-
     try:
-        x = _preprocess_tif(tif_path)
+        x = _preprocess_tif(job.tif_path)
 
-        if not force and npy_path.exists():
+        if not job.force and job.npy_path.exists():
             try:
-                existing = np.load(str(npy_path), mmap_mode="r")
+                existing = np.load(str(job.npy_path), mmap_mode="r")
                 if (
                     existing.shape == EXPECTED_SHAPE_CHW
                     and existing.dtype == np.float32
                     and np.array_equal(existing, x)
                 ):
-                    return npy_path, "skipped", ""
+                    return job.npy_path, "skipped", ""
             except Exception:
                 pass
 
-        np.save(str(npy_path), x)
-        return npy_path, "converted", ""
+        job.npy_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(str(job.npy_path), x)
+        return job.npy_path, "converted", ""
 
     except Exception as e:
-        return npy_path, "error", str(e)
+        return job.npy_path, "error", str(e)
 
 
 def parse_args():
@@ -105,6 +191,24 @@ def parse_args():
     )
     p.add_argument(
         "dataset_root", type=str, help="Main dataset directory (contains patches/ subdirectory)"
+    )
+    p.add_argument(
+        "--split-csv",
+        type=str,
+        default=None,
+        help=(
+            "Convert only entries from this split CSV. Entries must be relative DATA.npy paths "
+            "inside patches/, as in HySpecNet split files."
+        ),
+    )
+    p.add_argument(
+        "--output-root",
+        type=str,
+        default=None,
+        help=(
+            "Optional dataset root where converted DATA.npy files are mirrored under patches/. "
+            "If omitted, files are written next to source TIF files."
+        ),
     )
     p.add_argument("--workers", type=int, default=8, help="Number of parallel workers (default: 8)")
     p.add_argument("--dry-run", action="store_true", help="Only count files, do not convert")
@@ -146,6 +250,8 @@ def verify_sample(npy_files: list[Path], n: int = 20) -> None:
 def main():
     args = parse_args()
     dataset_root = Path(args.dataset_root)
+    split_csv = Path(args.split_csv) if args.split_csv else None
+    output_root = Path(args.output_root) if args.output_root else None
 
     if not dataset_root.exists():
         print(f"Error: {dataset_root} does not exist")
@@ -155,22 +261,28 @@ def main():
     if not patches_dir.exists():
         print(f"Error: directory {patches_dir} does not exist")
         sys.exit(1)
-
-    # find all tif files
-    tif_files = sorted(patches_dir.rglob("*-SPECTRAL_IMAGE.TIF"))
-    if not tif_files:
-        tif_files = sorted(patches_dir.rglob("*-SPECTRAL_IMAGE.tif"))
-    if not tif_files:
-        print(f"Error: no *-SPECTRAL_IMAGE.TIF files in {patches_dir}")
+    if split_csv is not None and not split_csv.exists():
+        print(f"Error: split CSV {split_csv} does not exist")
         sys.exit(1)
 
-    existing_npy = [f for f in tif_files if _npy_path(f).exists()]
+    try:
+        jobs = _build_jobs(
+            dataset_root=dataset_root,
+            split_csv=split_csv,
+            output_root=output_root,
+            force=args.force,
+        )
+    except Exception as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+
+    existing_npy = [job.npy_path for job in jobs if job.npy_path.exists()]
     correct_shape = 0
     wrong_shape = 0
     for f in existing_npy:
         try:
             # quick mmap check avoids loading full arrays while counting usable outputs.
-            arr = np.load(str(_npy_path(f)), mmap_mode="r")
+            arr = np.load(str(f), mmap_mode="r")
             if arr.shape == EXPECTED_SHAPE_CHW and arr.dtype == np.float32:
                 correct_shape += 1
             else:
@@ -178,15 +290,19 @@ def main():
         except Exception:
             wrong_shape += 1
 
-    to_convert = len(tif_files)
+    to_convert = len(jobs)
     size_per_file_mb = EXPECTED_BANDS * PATCH_SIZE * PATCH_SIZE * 4 / 1024 / 1024
-    total_gb = len(tif_files) * size_per_file_mb / 1024
+    total_gb = len(jobs) * size_per_file_mb / 1024
 
     print("=" * 55)
     print("  TIF → NPY CONVERSION  |  HySpecNet-11k")
     print("=" * 55)
     print(f"  Directory:           {patches_dir}")
-    print(f"  TIF files:           {len(tif_files):,}")
+    if split_csv is not None:
+        print(f"  Split CSV:           {split_csv}")
+    if output_root is not None:
+        print(f"  Output root:         {output_root}")
+    print(f"  Conversion jobs:     {len(jobs):,}")
     print(f"  Existing candidates: {correct_shape:,}  (shape {EXPECTED_SHAPE_CHW}, dtype float32)")
     if wrong_shape:
         print(f"  Wrong shape/error:   {wrong_shape:,}  (will be recalculated)")
@@ -203,14 +319,13 @@ def main():
         )
         return
 
-    job_args = [(f, args.force) for f in tif_files]
     counts = {"converted": 0, "skipped": 0, "error": 0}
     error_list = []
 
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
         # conversion is parallel because every patch can be processed independently.
-        futures = {executor.submit(convert_one, a): a[0] for a in job_args}
-        with tqdm(total=len(tif_files), unit="file", desc="Conversion") as bar:
+        futures = {executor.submit(convert_one, job): job.tif_path for job in jobs}
+        with tqdm(total=len(jobs), unit="file", desc="Conversion") as bar:
             for future in as_completed(futures):
                 npy_path, status, msg = future.result()
                 counts[status] += 1
@@ -234,7 +349,7 @@ def main():
 
     if args.verify or counts["error"] == 0:
         # sample verification catches shape, dtype, and range problems after conversion.
-        all_npy = [_npy_path(f) for f in tif_files if _npy_path(f).exists()]
+        all_npy = [job.npy_path for job in jobs if job.npy_path.exists()]
         verify_sample(all_npy)
 
 
